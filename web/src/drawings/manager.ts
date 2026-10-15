@@ -20,7 +20,9 @@ export interface ManagerOpts {
 
 interface Drag { kind: "handle" | "move"; id: string; index: number; startLogical: number; startPrice: number; orig: Drawing; moved: boolean }
 
-const HIT_TOL = 6;
+const HIT_TOL = 6;           // px: mouse / pen
+const TOUCH_TOL = 14;        // px: a fingertip is far less precise than a cursor
+const DOUBLE_TAP_MS = 400;
 const MAX_UNDO = 60;
 const BRUSH_MIN_PX = 3;      // decimation: ignore moves smaller than this
 const BRUSH_MAX_POINTS = 1500;
@@ -39,6 +41,9 @@ export class DrawingManager {
   private style: Style = { ...DEFAULT_STYLE };
   private storageKey = "";
   private editingId: string | null = null;
+  private claimed = false;                       // we own the current gesture: keep the chart from also panning
+  private tol = HIT_TOL;                         // hit tolerance for the current pointer type
+  private lastTap: { t: number; x: number; y: number } | null = null;
   private requestUpdate: (() => void) | null = null;
   private readonly primitive: ISeriesPrimitive<Time>;
   private readonly view: IPrimitivePaneView;
@@ -138,7 +143,7 @@ export class DrawingManager {
       const pts = projectPts(d, P);
       if (pts.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y))) continue;
       // only the selected drawing exposes handles; others are body-hit only
-      const hit = hitTest(d, pts, xy, w, h, HIT_TOL, extraPx(d, P));
+      const hit = hitTest(d, pts, xy, w, h, this.tol, extraPx(d, P));
       if (hit && (hit.kind === "body" || d.id === this.selectedId)) return { d, ...hit };
       if (hit && hit.kind === "handle") return { d, kind: "body", index: -1 };
     }
@@ -150,10 +155,18 @@ export class DrawingManager {
   // ------------------------------------------------------------------ pointer handling
   private bind(): void {
     const c = this.o.container;
-    c.addEventListener("mousedown", (e) => this.onDown(e), { capture: true });
-    window.addEventListener("mousemove", (e) => this.onMove(e));
-    window.addEventListener("mouseup", (e) => this.onUp(e));
-    c.addEventListener("dblclick", (e) => this.onDouble(e));
+    // Pointer Events cover mouse, touch and pen with one code path. touch-action:none stops the browser
+    // from scrolling/zooming the page (and cancelling our pointer stream) while a finger drags on the chart.
+    c.style.touchAction = "none";
+    c.addEventListener("pointerdown", (e) => this.onDown(e), { capture: true });
+    window.addEventListener("pointermove", (e) => this.onMove(e));
+    window.addEventListener("pointerup", (e) => this.onUp(e));
+    window.addEventListener("pointercancel", () => this.onCancel());
+    // The chart library has its own mouse/touch handlers that pointer events don't reach: while we own a
+    // gesture, stop those events at the container so the chart doesn't pan underneath a drawing drag.
+    for (const type of ["mousedown", "touchstart", "touchmove"]) {
+      c.addEventListener(type, (e) => { if (this.claimed) e.stopPropagation(); }, { capture: true });
+    }
     document.addEventListener("keydown", (e) => this.onKey(e));
     this.o.textInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.commitText(true);
@@ -163,16 +176,33 @@ export class DrawingManager {
     this.o.textInput.addEventListener("blur", () => this.commitText(true));
   }
 
-  private onDown(e: MouseEvent): void {
-    if (e.button !== 0 || e.target === this.o.textInput) return;
+  /** Take ownership of this gesture (keeps the chart's own handlers out of it). */
+  private claim(e: Event): void { this.claimed = true; e.stopPropagation(); e.preventDefault(); }
+  /** Release shortly after pointerup so the touch/mouse compat events that follow are still swallowed. */
+  private release(): void { setTimeout(() => { this.claimed = false; }, 60); }
+
+  private onDown(e: PointerEvent): void {
+    if (!e.isPrimary || (e.pointerType === "mouse" && e.button !== 0) || e.target === this.o.textInput) return;
+    this.tol = e.pointerType === "touch" ? TOUCH_TOL : HIT_TOL;
     // preventDefault below would stop the text box from blurring, so commit an open editor explicitly
     if (!this.o.textInput.hidden) this.commitText(true);
     const m = this.mouse(e);
     if (!m) return;                                   // axis area: let the chart handle it
-    if (this.tool !== "cursor") { e.stopPropagation(); e.preventDefault(); this.toolDown(m); return; }
+    if (this.tool !== "cursor") { this.claim(e); this.toolDown(m); return; }
     const hit = this.hitAt(m.xy);
     if (!hit) { if (this.selectedId) this.select(null); return; }        // empty space: let the chart pan
-    e.stopPropagation(); e.preventDefault();
+    this.claim(e);
+    // second press on a text label within DOUBLE_TAP_MS edits it (works for mouse and touch alike)
+    if (hit.d.type === "text") {
+      const prev = this.lastTap;
+      if (prev && e.timeStamp - prev.t < DOUBLE_TAP_MS && Math.hypot(prev.x - m.xy.x, prev.y - m.xy.y) < 20) {
+        this.lastTap = null;
+        this.select(hit.d.id);
+        this.openText(hit.d.id, hit.d.text ?? "");
+        return;
+      }
+      this.lastTap = { t: e.timeStamp, x: m.xy.x, y: m.xy.y };
+    }
     this.select(hit.d.id);
     this.drag = { kind: hit.kind === "body" ? "move" : "handle", id: hit.d.id, index: hit.index, startLogical: m.logical, startPrice: m.pt.p, orig: JSON.parse(JSON.stringify(hit.d)) as Drawing, moved: false };
   }
@@ -191,11 +221,13 @@ export class DrawingManager {
   private hoverEvent: MouseEvent | null = null;
   private hoverQueued = false;
 
-  private onMove(e: MouseEvent): void {
+  private onMove(e: PointerEvent): void {
+    if (!e.isPrimary) return;
     const active = this.drag || this.draft || this.brushing;
-    // idle hover: only over the chart, and at most once per animation frame
+    // idle hover (mouse/pen only; a finger has no hover): only over the chart, at most once per frame
     if (!active) {
-      if (this.tool !== "cursor" || !this.o.container.contains(e.target as Node)) return;
+      if (e.pointerType === "touch" || this.tool !== "cursor" || !(e.target instanceof Node) || !this.o.container.contains(e.target)) return;
+      this.tol = HIT_TOL;
       this.hoverEvent = e;
       if (!this.hoverQueued) {
         this.hoverQueued = true;
@@ -226,7 +258,25 @@ export class DrawingManager {
     if (this.draft) { this.hoverPt = m?.pt ?? this.hoverPt; this.redraw(); }
   }
 
-  private onUp(e: MouseEvent): void {
+  /** The browser took the pointer away (e.g. system gesture, palm rejection): abandon the gesture cleanly. */
+  private onCancel(): void {
+    if (this.drag) {
+      const dr = this.drag;
+      if (dr.moved) {
+        const i = this.drawings.findIndex((x) => x.id === dr.id);
+        if (i >= 0) this.drawings[i] = dr.orig;
+        this.undo.pop();                              // the undo entry pushed on first move is now meaningless
+      }
+      this.drag = null;
+    }
+    this.brushing = false;
+    this.draft = null; this.hoverPt = null;
+    this.release(); this.redraw();
+  }
+
+  private onUp(e: PointerEvent): void {
+    if (!e.isPrimary) return;
+    this.release();
     if (this.drag) {
       if (this.drag.moved) this.save();
       this.drag = null; return;
@@ -267,13 +317,6 @@ export class DrawingManager {
       d.pts[dr.index] = m.pt;
     }
     this.redraw();
-  }
-
-  private onDouble(e: MouseEvent): void {
-    if (this.tool !== "cursor") return;
-    const m = this.mouse(e);
-    const hit = m ? this.hitAt(m.xy) : null;
-    if (hit && hit.d.type === "text") this.openText(hit.d.id, hit.d.text ?? "");
   }
 
   private onKey(e: KeyboardEvent): void {
