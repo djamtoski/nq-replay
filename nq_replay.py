@@ -172,6 +172,18 @@ class MTFAggregator:
             start, end = self._bucket(ts, tf)
             self._f[tf] = [start, end, b.o, b.h, b.l, b.c, b.v]
 
+    def clone(self) -> "MTFAggregator":
+        """
+        Independent copy for snapshots. Bars are immutable tuples, so the closed-bar deques are copied
+        shallowly (sharing the Bar objects between snapshots); only the mutable forming lists are
+        duplicated. ~100x cheaper in time and memory than copy.deepcopy of the whole aggregator.
+        """
+        c = MTFAggregator.__new__(MTFAggregator)
+        c.tfs = self.tfs
+        c._closed = {tf: deque(d, maxlen=d.maxlen) for tf, d in self._closed.items()}
+        c._f = {tf: (None if f is None else list(f)) for tf, f in self._f.items()}
+        return c
+
     def closed(self, tf: int) -> deque[Bar]:
         return self._closed[tf]
 
@@ -424,10 +436,13 @@ class ReplaySession:
     """
 
     def __init__(self, bars: list[Bar], inst: Instrument = NQ, tfs=(60, 300, 900, 3600, 86400),
-                 exec_model: ExecModel = ExecModel(), balance=50_000.0, snapshot_every=3600):
+                 exec_model: ExecModel = ExecModel(), balance=50_000.0, snapshot_every=3600, max_snapshots=24):
         self.bars, self.inst = bars, inst
         self.tfs, self.exec_model, self.balance0 = tfs, exec_model, balance
         self.snapshot_every = snapshot_every
+        # Bounds memory; spacing stays roughly even (see _prune). Never below 5: _prune always keeps the
+        # earliest + newest 3, so a smaller cap could not be honoured.
+        self.max_snapshots = max(5, max_snapshots)
         self.state = Clock.PAUSED
         self.speed = 1.0
         self.on_bar: list[Callable[[Bar, "ReplaySession"], None]] = []
@@ -454,12 +469,33 @@ class ReplaySession:
                 self.asia.update(b)
         self.cursor = self.floor = n
         self.broker.last_price = self.bars[n - 1].c
-        self._snaps[n] = self._snapshot()
+        self._store_snapshot()
 
     def _snapshot(self) -> tuple:
-        # equity points are immutable tuples, so a shallow list copy is enough (and O(n) cheap)
-        return (copy.deepcopy(self.broker), copy.deepcopy(self.mtf), copy.deepcopy(self.asia),
-                list(self.equity_curve))
+        # The equity curve is NOT stored: it is append-only with exactly one point per stepped bar
+        # (len == cursor - floor), and actions before a retained snapshot never change, so its prefix is
+        # always still valid and a restore just truncates it. That removes an O(n) copy per snapshot.
+        return (copy.deepcopy(self.broker), self.mtf.clone(), copy.deepcopy(self.asia))
+
+    def _store_snapshot(self) -> None:
+        self._snaps[self.cursor] = self._snapshot()
+        self._prune()
+
+    def _prune(self) -> None:
+        """
+        Keep at most `max_snapshots`. Repeatedly drop the snapshot whose removal leaves the smallest gap
+        between its neighbours, so retained snapshots stay evenly spread over the whole run (worst-case
+        step_back replay ~ total_bars / max_snapshots) instead of memory growing with run length. The
+        earliest (warm-up floor) and the newest few are never dropped.
+        """
+        keep_recent = 3
+        while len(self._snaps) > self.max_snapshots:
+            ks = sorted(self._snaps)
+            cand = range(1, len(ks) - keep_recent)          # exclude earliest and the newest `keep_recent`
+            if not cand:
+                return
+            victim = min(cand, key=lambda i: ks[i + 1] - ks[i - 1])
+            del self._snaps[ks[victim]]
 
     def _reset(self) -> None:
         self.cursor = 0
@@ -486,7 +522,7 @@ class ReplaySession:
             # snapshot BEFORE callbacks: anything done at this cursor (by user or callback)
             # lives in the action log and is re-applied after a restore.
             if self.cursor % self.snapshot_every == 0:
-                self._snaps[self.cursor] = self._snapshot()
+                self._store_snapshot()
             for cb in self.on_bar:
                 cb(b, self)
 
@@ -541,9 +577,9 @@ class ReplaySession:
         snap_at = max(self._snaps, default=0)
         if snap_at:
             self.cursor = snap_at
-            b, m, a, eq = self._snaps[snap_at]
-            self.broker, self.mtf, self.asia = copy.deepcopy(b), copy.deepcopy(m), copy.deepcopy(a)
-            self.equity_curve = list(eq)
+            b, m, a = self._snaps[snap_at]
+            self.broker, self.mtf, self.asia = copy.deepcopy(b), m.clone(), copy.deepcopy(a)
+            del self.equity_curve[snap_at - self.floor:]       # prefix is still valid; see _snapshot
         else:
             self._reset()
         self._replaying = True

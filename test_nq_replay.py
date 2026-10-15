@@ -303,6 +303,84 @@ def test_aggregator_matches_naive_resample():
     assert c[0].v == sum(x.v for x in first)
 
 
+# ---------------- snapshot pruning ----------------
+def test_mtf_clone_is_equal_and_independent():
+    a = MTFAggregator([60, 300])
+    for b in mk_bars(700):
+        a.on_base_bar(b)
+    c = a.clone()
+    assert list(c.closed(60)) == list(a.closed(60)) and c.forming(300) == a.forming(300)
+    for b in mk_bars(200):                      # keep feeding the original; the clone must not move
+        a.on_base_bar(Bar(b.ts + 10**6 * S, b.o, b.h, b.l, b.c, b.v, S))
+    assert len(c.closed(60)) == 11 and len(a.closed(60)) > 11
+    c.on_base_bar(Bar(5 * 10**9 * S, 1, 1, 1, 1, 1, S))   # and mutating the clone must not touch the original
+    assert a.forming(60).ts != c.forming(60).ts
+
+
+def test_snapshots_are_capped_and_evenly_spread():
+    s = ReplaySession(mk_bars(4000), snapshot_every=20, max_snapshots=8, exec_model=ZERO, tfs=(60,))
+    s.step(4000)
+    ks = sorted(s._snaps)
+    assert len(ks) <= 8
+    assert ks[0] == 20                                      # earliest anchor kept
+    assert ks[-3:] == [3960, 3980, 4000]                    # newest few kept
+    gaps = [b - a for a, b in zip(ks, ks[1:])]
+    assert max(gaps) <= 4000 / 8 * 3                        # spread stays roughly even (bounded replay distance)
+
+
+def test_floor_snapshot_survives_pruning():
+    s = ReplaySession(mk_bars(3000), snapshot_every=10, max_snapshots=5, exec_model=ZERO, tfs=(60,))
+    s.preload(100)
+    s.step(2900)
+    assert min(s._snaps) == s.floor == 100 and len(s._snaps) <= 5
+
+
+def test_snapshot_cap_has_a_safe_minimum():
+    assert ReplaySession(mk_bars(10), max_snapshots=1).max_snapshots == 5
+    s = ReplaySession(mk_bars(2000), snapshot_every=10, max_snapshots=1, exec_model=ZERO, tfs=(60,))
+    s.step(2000)
+    assert len(s._snaps) <= 5
+
+
+@pytest.mark.parametrize("max_snaps", [5, 8])
+def test_pruned_session_rewinds_exactly_like_unpruned(max_snaps):
+    """Pruning only changes how far a rewind must replay, never the resulting state."""
+    def run(max_snapshots):
+        s = ReplaySession(mk_bars(3000), snapshot_every=25, max_snapshots=max_snapshots, exec_model=ZERO, tfs=(60, 300))
+        s.preload(60)
+        s.step(200)
+        s.submit(Order(Side.LONG, 2, OType.MARKET))
+        s.step(300)
+        (pid,) = s.broker.positions
+        s.modify(pid, sl=s.bars[499].c - 6, tp=s.bars[499].c + 9)
+        s.step(1500)
+        out = []
+        for back in (50, 700, 1200):                        # several rewinds, each followed by playing forward
+            s.step_back(back)
+            out.append((s.cursor, round(s.broker.equity(), 6), len(s.broker.trades), list(s.equity_curve[-3:])))
+            s.step(back // 2)
+            out.append((s.cursor, round(s.broker.equity(), 6), len(s.broker.trades), len(s.mtf.closed(60))))
+        return out, s
+    pruned, sp = run(max_snaps)
+    full, sf = run(10**6)
+    assert pruned == full
+    assert len(sp._snaps) <= max_snaps < len(sf._snaps)
+
+
+def test_equity_curve_is_one_point_per_stepped_bar_after_rewinds():
+    s = ReplaySession(mk_bars(1500), snapshot_every=40, max_snapshots=4, exec_model=ZERO, tfs=(60,))
+    s.preload(50)
+    s.step(900)
+    s.step_back(600)
+    s.step(300)
+    s.step_back(250)
+    assert len(s.equity_curve) == s.cursor - s.floor
+    fresh = ReplaySession(mk_bars(1500), snapshot_every=40, exec_model=ZERO, tfs=(60,))
+    fresh.preload(50)
+    fresh.step(s.cursor - 50)
+    assert s.equity_curve == fresh.equity_curve
+
+
 # ---------------- manual actions survive step_back (regression) ----------------
 def manual_session(snap):
     return ReplaySession(mk_bars(), snapshot_every=snap, exec_model=ZERO)
