@@ -1,8 +1,8 @@
 import type { CanvasRenderingTarget2D } from "fancy-canvas";
 import type { IChartApi, IPrimitivePaneRenderer, IPrimitivePaneView, ISeriesApi, ISeriesPrimitive, SeriesAttachedParameter, Time } from "lightweight-charts";
-import { hitTest, logicalToTime, timeToLogical, type XY } from "./geometry";
+import { hitTest, logicalToTime, sanitizeDrawings, timeToLogical, type XY } from "./geometry";
 import { drawDrawing, extraPx, projectPts, type Proj } from "./render";
-import { COLORS, DEFAULT_STYLE, NEED, TOOLS, type Drawing, type DrawType, type Pt, type Style, type ToolId } from "./types";
+import { COLORS, DEFAULT_STYLE, NEED, TOOLS, svg, type Drawing, type DrawType, type Pt, type Style, type ToolId } from "./types";
 
 export interface ManagerOpts {
   chart: IChartApi;
@@ -15,12 +15,15 @@ export interface ManagerOpts {
   getInterval: () => number;       // seconds per bar of the current timeframe
   getPointValue: () => number;
   fmtPrice: (p: number) => string;
+  notify?: (message: string) => void;   // surfaced to the user (e.g. storage failures)
 }
 
 interface Drag { kind: "handle" | "move"; id: string; index: number; startLogical: number; startPrice: number; orig: Drawing; moved: boolean }
 
 const HIT_TOL = 6;
 const MAX_UNDO = 60;
+const BRUSH_MIN_PX = 3;      // decimation: ignore moves smaller than this
+const BRUSH_MAX_POINTS = 1500;
 
 export class DrawingManager {
   private drawings: Drawing[] = [];
@@ -63,13 +66,14 @@ export class DrawingManager {
   load(key: string): void {
     this.storageKey = key;
     this.selectedId = null; this.draft = null; this.undo = [];
-    try { this.drawings = JSON.parse(localStorage.getItem(key) ?? "[]") as Drawing[]; } catch { this.drawings = []; }
-    if (!Array.isArray(this.drawings)) this.drawings = [];
+    // storage is untrusted: validate every item so one bad record can't throw inside the renderer each frame
+    try { this.drawings = sanitizeDrawings(JSON.parse(localStorage.getItem(key) ?? "[]")); } catch { this.drawings = []; }
     this.syncUi(); this.redraw();
   }
   private save(): void {
     if (!this.storageKey) return;
-    try { localStorage.setItem(this.storageKey, JSON.stringify(this.drawings)); } catch { /* quota / private mode */ }
+    try { localStorage.setItem(this.storageKey, JSON.stringify(this.drawings)); }
+    catch { this.o.notify?.("Couldn't save drawings (browser storage is full or blocked); they will be lost on reload."); }
   }
   private pushUndo(): void { this.undo.push(JSON.stringify(this.drawings)); if (this.undo.length > MAX_UNDO) this.undo.shift(); }
   private doUndo(): void {
@@ -161,6 +165,8 @@ export class DrawingManager {
 
   private onDown(e: MouseEvent): void {
     if (e.button !== 0 || e.target === this.o.textInput) return;
+    // preventDefault below would stop the text box from blurring, so commit an open editor explicitly
+    if (!this.o.textInput.hidden) this.commitText(true);
     const m = this.mouse(e);
     if (!m) return;                                   // axis area: let the chart handle it
     if (this.tool !== "cursor") { e.stopPropagation(); e.preventDefault(); this.toolDown(m); return; }
@@ -182,20 +188,42 @@ export class DrawingManager {
     this.redraw();
   }
 
+  private hoverEvent: MouseEvent | null = null;
+  private hoverQueued = false;
+
   private onMove(e: MouseEvent): void {
+    const active = this.drag || this.draft || this.brushing;
+    // idle hover: only over the chart, and at most once per animation frame
+    if (!active) {
+      if (this.tool !== "cursor" || !this.o.container.contains(e.target as Node)) return;
+      this.hoverEvent = e;
+      if (!this.hoverQueued) {
+        this.hoverQueued = true;
+        requestAnimationFrame(() => {
+          this.hoverQueued = false;
+          const ev = this.hoverEvent;
+          if (!ev || this.drag || this.draft) return;
+          const m = this.mouse(ev);
+          const over = m ? this.hitAt(m.xy) : null;
+          this.o.container.style.cursor = over ? (over.kind === "handle" ? "grab" : "pointer") : "";
+        });
+      }
+      return;
+    }
     const m = this.mouse(e);
     if (this.drag) { if (m) this.dragTo(m); return; }
     if (this.brushing && this.draft && m) {
       const last = this.draft.pts[this.draft.pts.length - 1];
-      const P = this.proj(this.paneSize().w, this.paneSize().h);
-      if (Math.hypot(P.x(last.t) - m.xy.x, P.y(last.p) - m.xy.y) > 2) { this.draft.pts.push(m.pt); this.redraw(); }
+      const { w, h } = this.paneSize();
+      const P = this.proj(w, h);
+      if (Math.hypot(P.x(last.t) - m.xy.x, P.y(last.p) - m.xy.y) > BRUSH_MIN_PX) {
+        this.draft.pts.push(m.pt);
+        if (this.draft.pts.length >= BRUSH_MAX_POINTS) { this.brushing = false; this.finish(); }
+        this.redraw();
+      }
       return;
     }
-    if (this.draft) { this.hoverPt = m?.pt ?? this.hoverPt; this.redraw(); return; }
-    if (this.tool === "cursor") {
-      const over = m ? this.hitAt(m.xy) : null;
-      this.o.container.style.cursor = over ? (over.kind === "handle" ? "grab" : "pointer") : "";
-    }
+    if (this.draft) { this.hoverPt = m?.pt ?? this.hoverPt; this.redraw(); }
   }
 
   private onUp(e: MouseEvent): void {
@@ -250,7 +278,7 @@ export class DrawingManager {
 
   private onKey(e: KeyboardEvent): void {
     const t = e.target as HTMLElement;
-    if (t.matches("input,select,textarea")) return;
+    if (t.matches("input,select,textarea") || document.querySelector("dialog[open]")) return;
     if (e.key === "Escape") { this.draft = null; this.brushing = false; this.setTool("cursor"); this.select(null); }
     else if ((e.key === "Delete" || e.key === "Backspace") && this.selectedId) { e.preventDefault(); this.remove(this.selectedId); }
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); this.doUndo(); }
@@ -308,7 +336,10 @@ export class DrawingManager {
     const d = this.drawings.find((x) => x.id === id);
     if (!d) return;
     const v = inp.value.trim();
-    if (save && v) { d.text = v; this.save(); }
+    if (save && v) {
+      if (d.text && d.text !== v) this.pushUndo();      // editing existing text is undoable (creation was already recorded)
+      d.text = v; this.save();
+    }
     else if (!d.text) { this.drawings = this.drawings.filter((x) => x.id !== id); this.selectedId = null; this.save(); }
     this.syncUi(); this.redraw();
   }
@@ -316,6 +347,7 @@ export class DrawingManager {
   // ------------------------------------------------------------------ UI (toolbar + property bar)
   setTool(t: ToolId): void {
     this.tool = t; this.draft = null; this.hoverPt = null; this.brushing = false;
+    if (t !== "cursor") this.visible = true;      // never let the user draw while drawings are hidden
     this.o.container.style.cursor = t === "cursor" ? "" : "crosshair";
     this.syncUi(); this.redraw();
   }
@@ -358,5 +390,5 @@ export class DrawingManager {
   }
 }
 
-const EYE = `<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10z"/><circle cx="10" cy="10" r="2.3"/></svg>`;
-const TRASH = `<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h12M8 6V4h4v2M6 6l.7 10h6.6L14 6"/></svg>`;
+const EYE = svg('<path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10z"/><circle cx="10" cy="10" r="2.3"/>');
+const TRASH = svg('<path d="M4 6h12M8 6V4h4v2M6 6l.7 10h6.6L14 6"/>');

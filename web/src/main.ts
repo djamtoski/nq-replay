@@ -89,6 +89,7 @@ function pushBar(b: Bar): void {
 const drawings = new DrawingManager({
   chart, series, container: $("chart"), toolbar: $("drawbar"), propbar: $("propbar"), textInput: $<HTMLInputElement>("textInput"),
   getTimes: () => times, getInterval: () => tf, getPointValue: () => pointValue, fmtPrice: (p) => fmt(p),
+  notify: (m) => { st.lastError = m; scheduleRender(); },
 });
 
 chart.subscribeCrosshairMove((p) => {

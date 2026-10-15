@@ -21,7 +21,7 @@ export const NEED: Record<DrawType, number> = {
   channel: 3, fib: 2, long: 2, short: 2, measure: 2, text: 1, brush: 0,
 };
 
-const svg = (inner: string) =>
+export const svg = (inner: string) =>
   `<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
 
 export const TOOLS: { id: ToolId; label: string; icon: string }[] = [

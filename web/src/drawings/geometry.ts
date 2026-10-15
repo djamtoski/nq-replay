@@ -1,5 +1,39 @@
 // Pure geometry for drawings (no DOM / chart dependency) so it can be unit-tested.
-import type { Drawing, Pt } from "./types";
+import { DEFAULT_STYLE, NEED, type Drawing, type Pt } from "./types";
+
+// ---------------------------------------------------------------- persistence safety
+const num = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
+
+/**
+ * Rebuild a trusted Drawing[] from untrusted JSON (localStorage). Anything malformed is dropped rather
+ * than passed to the renderer, where a single bad item would throw on every frame.
+ */
+export function sanitizeDrawings(raw: unknown): Drawing[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Drawing[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const d = item as Record<string, unknown>;
+    if (typeof d.type !== "string" || !Object.prototype.hasOwnProperty.call(NEED, d.type)) continue;
+    const type = d.type as Drawing["type"];
+    if (!Array.isArray(d.pts) || !d.pts.every((p) => p && num((p as Pt).t) && num((p as Pt).p))) continue;
+    const pts = (d.pts as Pt[]).map((p) => ({ t: p.t, p: p.p }));
+    if (pts.length < (type === "brush" ? 2 : NEED[type])) continue;
+    const s = (d.style ?? {}) as Record<string, unknown>;
+    out.push({
+      id: typeof d.id === "string" && d.id ? d.id : Math.random().toString(36).slice(2, 10),
+      type, pts,
+      style: {
+        color: typeof s.color === "string" ? s.color : DEFAULT_STYLE.color,
+        width: num(s.width) ? Math.min(8, Math.max(1, s.width)) : DEFAULT_STYLE.width,
+        dash: s.dash === true,
+      },
+      ...(typeof d.text === "string" ? { text: d.text } : {}),
+      ...(num(d.stop) ? { stop: d.stop } : {}),
+    });
+  }
+  return out;
+}
 
 export interface XY { x: number; y: number }
 
