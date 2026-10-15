@@ -1,5 +1,5 @@
 import { CandlestickSeries, ColorType, createChart, CrosshairMode, LineStyle, type CandlestickData, type IPriceLine, type UTCTimestamp } from "lightweight-charts";
-import { apply, bracket, fmt, initial, nextCandleEnd, prevCandleEnd, type Bar, type ServerMsg, type State } from "./store";
+import { apply, bracket, drawsChart, fmt, initial, nextCandleEnd, prevCandleEnd, type Bar, type ServerMsg, type State } from "./store";
 import { CPS, cpsLabel, effectiveCps, feasible, replayRate } from "./speed";
 import { DrawingManager } from "./drawings/manager";
 
@@ -216,13 +216,15 @@ function onMessage(raw: string): void {
   let m: ServerMsg;
   try { m = JSON.parse(raw) as ServerMsg; } catch (e) { console.error("bad server message", e, raw.slice(0, 200)); return; }
   apply(st, m);
-  if (m.type === "reset") {
-    if (!replayStart) replayStart = m.now;
-    redrawChart();
-  } else if (m.type === "tick") {
-    for (const b of m.closed[String(tf)] ?? []) pushBar(b);
-    const f = st.forming[String(tf)];
-    if (f) pushBar(f);
+  if (m.type === "reset" && !replayStart) replayStart = m.now;
+  if (drawsChart(m, tf)) {                        // stale-timeframe messages only update account/positions (see drawsChart)
+    if (m.type === "tick") {
+      for (const b of m.closed[String(tf)] ?? []) pushBar(b);
+      const f = st.forming[String(tf)];
+      if (f) pushBar(f);
+    } else {
+      redrawChart();                              // reset or view: rebuild from the new history
+    }
   }
   scheduleRender();
 }
@@ -252,7 +254,7 @@ async function newSession(cfg: SessionCfg): Promise<string | null> {
     setConn(`server error`, "bad");
     return msg === "Failed to fetch" ? `Can't reach the API at ${API}. Is the server running?` : msg;
   }
-  const sock = new WebSocket(`${API.replace(/^http/, "ws")}/ws/${sid}`);
+  const sock = new WebSocket(`${API.replace(/^http/, "ws")}/ws/${sid}?tf=${tf}`);   // server sends only this timeframe's bars
   ws = sock;
   sock.onopen = () => { setConn("connected", "on"); syncSpeed(); };
   sock.onclose = () => { if (ws === sock) setConn("disconnected", "bad"); };
@@ -268,7 +270,10 @@ $("tfs").addEventListener("click", (e) => {
   if (!v || v === tf) return;
   tf = v; store.set("tf", v);
   document.querySelectorAll("#tfs button").forEach((b) => b.classList.toggle("active", Number((b as HTMLElement).dataset.tf) === v));
-  hover = null; redrawChart(); syncSpeed(); scheduleRender();
+  hover = null;
+  series.setData([]); times = [];                 // blank until the server's `view` reply brings this timeframe's bars
+  send({ cmd: "view", tf });
+  syncSpeed(); scheduleRender();
 });
 
 // replay dock
