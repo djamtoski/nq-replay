@@ -248,39 +248,49 @@ class Runtime:
         f = ss.mtf.forming(tf)
         return {str(tf): [_bar(b) for b in list(closed)[-HISTORY:]]}, {str(tf): _bar(f) if f else None}
 
-    def reset_msg(self, c: Client) -> dict:
+    def _shared(self) -> dict:
+        """
+        The parts of a tick/reset that are identical for every client. Built ONCE per broadcast: account()
+        walks the whole equity curve, so computing it per client multiplied that cost by the tab count, and
+        building it once also gives every client the same snapshot.
+        """
         ss = self.ss
+        last = ss.bars[ss.cursor - 1] if ss.cursor else None
+        return {"now": ss.now // S, "cursor": ss.cursor, "total": len(ss.bars), "bar": _bar(last) if last else None,
+                "positions": _positions(ss.broker), "orders": _orders(ss.broker),
+                "account": self.account(), "sessions": self.sessions()}
+
+    def reset_msg(self, c: Client, sh: Optional[dict] = None) -> dict:
+        ss = self.ss
+        sh = sh or self._shared()
         hist, forming = self._history(c)
         c.sent_trades = len(ss.broker.trades)
-        return {"type": "reset", "tf": c.tf, "now": ss.now // S, "cursor": ss.cursor, "total": len(ss.bars),
+        return {"type": "reset", "tf": c.tf, "now": sh["now"], "cursor": sh["cursor"], "total": sh["total"],
                 "state": ss.state.name.lower(), "speed": ss.speed, "history": hist, "forming": forming,
-                "positions": _positions(ss.broker), "orders": _orders(ss.broker),
-                "trades": [_trade(t) for t in ss.broker.trades], "account": self.account(),
-                "sessions": self.sessions()}
+                "positions": sh["positions"], "orders": sh["orders"], "trades": [_trade(t) for t in ss.broker.trades],
+                "account": sh["account"], "sessions": sh["sessions"]}
 
     def view_msg(self, c: Client) -> dict:
         """Sent when a client switches timeframe: just the new timeframe's bars."""
         hist, forming = self._history(c)
         return {"type": "view", "tf": c.tf, "history": hist, "forming": forming}
 
-    def tick_msg(self, c: Client) -> dict:
+    def tick_msg(self, c: Client, sh: Optional[dict] = None) -> dict:
         ss, tf = self.ss, c.tf
-        new = []
+        sh = sh or self._shared()
+        fresh: list[Bar] = []                       # newest first
         for b in reversed(ss.mtf.closed(tf)):
             if b.ts <= c.sent_ts:
                 break
-            new.append(_bar(b))
-        if new:
-            c.sent_ts = max(x["t"] * S for x in new)
+            fresh.append(b)
+        if fresh:
+            c.sent_ts = fresh[0].ts
         new_trades = [_trade(t) for t in ss.broker.trades[c.sent_trades:]]
         c.sent_trades = len(ss.broker.trades)
-        last = ss.bars[ss.cursor - 1] if ss.cursor else None
         f = ss.mtf.forming(tf)
-        return {"type": "tick", "tf": tf, "now": ss.now // S, "cursor": ss.cursor, "total": len(ss.bars),
-                "bar": _bar(last) if last else None, "closed": {str(tf): new[::-1]} if new else {},
-                "forming": {str(tf): _bar(f) if f else None},
-                "positions": _positions(ss.broker), "orders": _orders(ss.broker), "new_trades": new_trades,
-                "account": self.account(), "sessions": self.sessions()}
+        return {"type": "tick", "tf": tf, **sh,
+                "closed": {str(tf): [_bar(b) for b in reversed(fresh)]} if fresh else {},
+                "forming": {str(tf): _bar(f) if f else None}, "new_trades": new_trades}
 
     async def _send(self, c: Client, msg: dict) -> None:
         msg = _clean(msg)
@@ -297,9 +307,12 @@ class Runtime:
             await self._send(c, msg)
 
     async def broadcast_each(self, build) -> None:
-        """Per-client message (bar data differs by the timeframe each client views)."""
+        """Per-client message (bar data differs by the timeframe each client views); shared parts built once."""
+        if not self.clients:
+            return
+        shared = self._shared()
         for c in list(self.clients.values()):
-            await self._send(c, build(c))
+            await self._send(c, build(c, shared))
 
     # ---- playback
     async def _play(self) -> None:
@@ -463,8 +476,11 @@ async def delete_session(sid: str) -> dict:
 
 
 @app.websocket("/ws/{sid}")
-async def ws(websocket: WebSocket, sid: str, tf: int = 60) -> None:
-    """`?tf=<seconds>` selects the timeframe whose bars this client receives (change later with the `view` command)."""
+async def ws(websocket: WebSocket, sid: str, tf: Optional[int] = None) -> None:
+    """
+    `?tf=<seconds>` selects the timeframe whose bars this client receives (change later with the `view`
+    command). Omitted: 1m if the session has it, otherwise its first timeframe.
+    """
     origin = websocket.headers.get("origin")
     if origin is not None and origin not in ALLOWED_ORIGINS:
         await websocket.close(code=1008)
@@ -473,6 +489,8 @@ async def ws(websocket: WebSocket, sid: str, tf: int = 60) -> None:
     if not rt:
         await websocket.close(code=4404)
         return
+    if tf is None:
+        tf = 60 if 60 in rt.ss.tfs else rt.ss.tfs[0]
     if tf not in rt.ss.tfs:
         await websocket.close(code=4400)       # unknown timeframe
         return

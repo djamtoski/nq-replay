@@ -219,6 +219,54 @@ def test_view_command_switches_timeframe_and_streams_new_one(client):
         assert t["closed"]["300"][0]["t"] > v["history"]["300"][-1]["t"]
 
 
+def test_session_without_a_60s_timeframe_still_accepts_clients_that_omit_tf(client):
+    sid = new_session(client, tfs=[15, 300])
+    with client.websocket_connect(f"/ws/{sid}") as ws:               # no ?tf=: falls back to the first timeframe
+        r = ws.receive_json()
+        assert r["tf"] == 15 and list(r["history"]) == ["15"]
+    sid2 = new_session(client, tfs=[1, 60, 300])
+    with client.websocket_connect(f"/ws/{sid2}") as ws:               # 1m present: it stays the default
+        assert ws.receive_json()["tf"] == 60
+
+
+def test_shared_tick_parts_are_built_once_per_broadcast_not_per_client(client, monkeypatch):
+    sid = new_session(client, tfs=[60, 300])
+    rt = server.RUNTIMES[sid]
+    calls = {"n": 0}
+    real = rt.account
+    monkeypatch.setattr(rt, "account", lambda: (calls.__setitem__("n", calls["n"] + 1), real())[1])
+    with client.websocket_connect(f"/ws/{sid}?tf=60") as a, client.websocket_connect(f"/ws/{sid}?tf=300") as b:
+        a.receive_json(); b.receive_json()
+        calls["n"] = 0
+        a.send_json({"cmd": "step", "n": 10})
+        ta, tb = a.receive_json(), b.receive_json()
+        assert calls["n"] == 1                                       # account()/stats() once for two tabs
+        assert ta["account"] == tb["account"] and ta["positions"] == tb["positions"] and ta["now"] == tb["now"]
+
+
+def test_switching_timeframe_during_playback_has_no_gaps_or_duplicates(client):
+    sid = new_session(client, tfs=[60, 300], bars=20000)
+    with client.websocket_connect(f"/ws/{sid}?tf=60") as ws:
+        ws.receive_json()
+        ws.send_json({"cmd": "speed", "value": 3000})                # a 5m bar every ~0.1 s
+        recv_until(ws, "state")
+        ws.send_json({"cmd": "play"})
+        while recv_until(ws, "tick")["cursor"] < 1000:               # let a few 5m bars close first
+            pass
+        ws.send_json({"cmd": "view", "tf": 300})                     # switch while ticks for 1m are still arriving
+        v = recv_until(ws, "view")                                   # (stale 1m ticks before it are expected)
+        last = v["history"]["300"][-1]["t"]
+        seen = []
+        while len(seen) < 6:
+            m = ws.receive_json()
+            if m["type"] != "tick":
+                continue
+            assert m["tf"] == 300 and set(m["closed"]) <= {"300"}    # nothing for the old timeframe after the switch
+            seen += [b["t"] for b in m["closed"].get("300", [])]
+        assert seen == [last + 300 * (i + 1) for i in range(len(seen))]   # contiguous: no gap, no repeat
+        ws.send_json({"cmd": "pause"})
+
+
 def test_view_rejects_unknown_timeframe_and_ws_rejects_bad_query(client):
     sid = new_session(client, tfs=[60, 300])
     with client.websocket_connect(f"/ws/{sid}") as ws:
