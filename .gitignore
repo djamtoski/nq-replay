@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Market data and secrets - never commit
+data/
+*.parquet
+*.dbn
+*.dbn.zst
+.env
+.env.*
+*.key
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NQ Replay</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header>
+      <span class="brand">NQ Replay</span>
+      <span id="symbol" class="sym">NQ · CME</span>
+      <span class="sep"></span>
+      <div id="tfs" class="seg" role="group" aria-label="Timeframe"></div>
+      <span class="spacer"></span>
+      <span id="conn" class="pill">connecting…</span>
+      <button id="newSession" title="Start a new session">New session…</button>
+      <button id="togglePanels" title="Hide/show side panel and positions (chart focus)">Focus</button>
+      <button id="fullscreen" title="Full screen (F)">⛶ Full screen</button>
+    </header>
+
+    <div class="body">
+      <div class="chartcol">
+        <div class="chartarea">
+          <div id="chart"></div>
+          <div id="legend" class="legend"></div>
+          <div id="clock" class="clock"></div>
+
+          <div class="dock" role="toolbar" aria-label="Replay controls">
+            <button id="prevCandle" title="Back one candle (←)">⏮</button>
+            <button id="play" class="primary" title="Play / pause (Space)">▶</button>
+            <button id="nextCandle" title="Forward one candle (→)">⏭</button>
+            <span class="vsep"></span>
+            <label class="speed" title="Replay seconds per real second">
+              <select id="speed" aria-label="Replay speed"></select>
+            </label>
+            <span class="vsep"></span>
+            <span id="pos" class="muted"></span>
+          </div>
+        </div>
+
+        <section id="drawer" class="drawer">
+          <div class="tabs" role="tablist">
+            <button data-tab="positions" class="active">Positions <b id="nPos">0</b></button>
+            <button data-tab="orders">Orders <b id="nOrd">0</b></button>
+            <button data-tab="trades">History <b id="nTr">0</b></button>
+            <span class="spacer"></span>
+            <button id="flatten" class="danger" title="Close all positions and cancel all orders">Flatten all</button>
+          </div>
+          <div class="tabbody">
+            <table id="tPositions"><thead><tr><th>Side</th><th>Qty</th><th>Entry</th><th>SL</th><th>TP</th><th>P&amp;L</th><th></th></tr></thead><tbody></tbody></table>
+            <table id="tOrders" hidden><thead><tr><th>Type</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th><th></th></tr></thead><tbody></tbody></table>
+            <table id="tTrades" hidden><thead><tr><th>Closed (NY)</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>R</th><th>Why</th></tr></thead><tbody></tbody></table>
+          </div>
+        </section>
+      </div>
+
+      <aside id="side">
+        <section class="card">
+          <h3>Order ticket</h3>
+          <div id="otype" class="seg wide" role="group" aria-label="Order type">
+            <button data-t="market" class="active">Market</button><button data-t="limit">Limit</button><button data-t="stop">Stop</button>
+          </div>
+          <div class="grid2">
+            <label>Quantity <input id="qty" type="number" min="1" value="1" /></label>
+            <label>Price <input id="price" type="number" step="0.25" disabled placeholder="market" /></label>
+            <label>Stop loss (pts) <input id="sl" type="number" step="0.25" min="0" placeholder="–" /></label>
+            <label>Take profit (pts) <input id="tp" type="number" step="0.25" min="0" placeholder="–" /></label>
+            <label class="span2">Trailing stop (ticks) <input id="trail" type="number" min="1" placeholder="–" /></label>
+          </div>
+          <div class="buysell">
+            <button id="sell" class="sell">SELL<small id="sellPx"></small></button>
+            <button id="buy" class="buy">BUY<small id="buyPx"></small></button>
+          </div>
+          <div id="err" class="err" role="alert"></div>
+        </section>
+
+        <section class="card">
+          <h3>Account</h3>
+          <dl id="stats"></dl>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <dialog id="sessionDlg">
+    <form method="dialog" id="sessionForm">
+      <h2>New session</h2>
+      <div class="grid2">
+        <label>Data
+          <select id="source"><option value="synthetic">Synthetic (demo)</option><option value="parquet">Real data (Parquet)</option></select>
+        </label>
+        <label>Contract <select id="inst"><option>NQ</option><option>MNQ</option></select></label>
+        <label>Start time (NY) <input id="startTime" type="time" value="09:00" /></label>
+        <label>Balance ($) <input id="balance" type="number" min="1000" step="1000" value="50000" /></label>
+        <label class="real">Start date <input id="start" type="date" /></label>
+        <label class="real">End date <input id="end" type="date" /></label>
+      </div>
+      <p class="muted small">Synthetic: 3 trading days of generated 1-second bars; the replay starts on the last day with earlier days shown as chart history.</p>
+      <p id="dlgErr" class="err"></p>
+      <div class="dlgbtns">
+        <button value="cancel" type="button" id="dlgCancel">Cancel</button>
+        <button value="ok" class="primary" id="dlgOk">Start</button>
+      </div>
+    </form>
+  </dialog>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

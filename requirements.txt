@@ -1,0 +1,7 @@
+databento>=0.87
+pyarrow>=26
+tzdata        # Windows has no system tz database
+fastapi>=0.143
+uvicorn[standard]>=0.54
+httpx         # TestClient
+pytest
