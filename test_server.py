@@ -39,6 +39,12 @@ def test_create_get_delete(client):
     assert client.get(f"/sessions/{sid}").status_code == 404
 
 
+@pytest.mark.parametrize("bad", ["../../etc", "a/b", "NQ..v", "", "x" * 40])
+def test_parquet_symbol_cannot_escape_the_data_directory(client, bad):
+    r = client.post("/sessions", json={"source": "parquet", "symbol": bad, "start": "2025-03-10", "end": "2025-03-11"})
+    assert r.status_code == 422
+
+
 def test_create_validation(client):
     assert client.post("/sessions", json={"balance": -5}).status_code == 422
     assert client.post("/sessions", json={"source": "parquet"}).status_code == 422

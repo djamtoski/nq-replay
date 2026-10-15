@@ -27,6 +27,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
+from nq_data import SYMBOL_MAX, SYMBOL_PATTERN
 from nq_replay import (MNQ, NQ, Bar, Broker, ExecModel, Order, OType, ReplaySession, Side, Clock, stats)
 
 ALLOWED_ORIGINS = {"http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173",
@@ -108,7 +109,7 @@ def _clean(x):
 class CreateSession(BaseModel):
     source: Literal["synthetic", "parquet"] = "synthetic"
     instrument: Literal["NQ", "MNQ"] = "NQ"
-    symbol: str = "NQ.v.0"
+    symbol: str = Field("NQ.v.0", pattern=SYMBOL_PATTERN, max_length=SYMBOL_MAX)   # a directory name: same rule as nq_data.check_symbol
     start: Optional[date] = None
     end: Optional[date] = None
     back_adjust: bool = False
@@ -436,6 +437,8 @@ def _build(req: CreateSession) -> ReplaySession:
                                      req.end, back_adjust=req.back_adjust)
         except FileNotFoundError as e:
             raise HTTPException(404, str(e))
+        except ValueError as e:                       # e.g. a symbol the loader rejects: a client error, not a 500
+            raise HTTPException(422, str(e))
         warm = start_index(bars, req.start, req.start_time)
         if warm >= len(bars):
             raise HTTPException(404, f"no data at or after {req.start} {req.start_time} NY")

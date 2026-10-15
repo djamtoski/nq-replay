@@ -23,6 +23,25 @@ python nq_data.py ingest --start 2025-03-03 --end 2025-03-07
 ```
 Then choose "Parquet" in the UI.
 
+How ingest behaves (all covered by `test_nq_data_databento.py`):
+- Files live under the **full symbol** (`data/bars/NQ.v.0/1s/...`), so `NQ.v.0` and `NQ.c.0` never mix.
+- Only **finished** trading days (2 h after the 17:00 NY close) are downloaded: a day still open would be stored
+  partial and then skipped forever by later runs.
+- `cost` and `ingest` both use the same plan, so the price shown is for the days that will really be fetched
+  (days already on disk are skipped; `--force` redownloads).
+- `--yes` refuses estimates above $25 unless you pass `--max-cost USD`; interactive runs ask first and also
+  honour `--max-cost`. Non-interactive runs without `--yes` abort instead of proceeding.
+- Bars outside the requested trading-day window are rejected before anything is written.
+
+**First live run (cheap and safe):** the Databento path is tested offline against genuine DBN data (see
+`test_nq_data_databento.py`) but has never called the live API. Start small:
+1. `python nq_data.py cost --start 2025-03-10 --end 2025-03-10` (one day) and check the price;
+2. `python nq_data.py ingest --start 2025-03-10 --end 2025-03-10`, then `python nq_data.py info`;
+3. choose "Real data", start/end date 2025-03-10 (the app loads 3 earlier trading days as chart history, so
+   ingest those too, or set the start a few days after your first downloaded day).
+If Databento rejects a request (bad key, dates it does not have yet) you get a one-line message; days already
+downloaded are kept and the next run resumes after them. The key is read only from `DATABENTO_API_KEY`.
+
 ## WebSocket protocol (`/ws/{session_id}?tf=<seconds>`)
 Bar data is sent **per client, for one timeframe only**: the one in `?tf=` (default 60 if the session has it,
 else its first timeframe). Switch with `{"cmd":"view","tf":300}`; the server replies `{"type":"view","tf",
