@@ -19,10 +19,11 @@ export interface State {
 }
 
 export type ServerMsg =
-  | { type: "reset"; now: number; cursor: number; total: number; state: string; speed: number;
+  | { type: "reset"; tf: number; now: number; cursor: number; total: number; state: string; speed: number;
       history: Record<string, Bar[]>; forming: Record<string, Bar | null>;
       positions: Position[]; orders: OrderRow[]; trades: Trade[]; account: Account; sessions: SessionRanges }
-  | { type: "tick"; now: number; cursor: number; total: number; bar: Bar | null;
+  | { type: "view"; tf: number; history: Record<string, Bar[]>; forming: Record<string, Bar | null> }
+  | { type: "tick"; tf: number; now: number; cursor: number; total: number; bar: Bar | null;
       closed: Record<string, Bar[]>; forming: Record<string, Bar | null>;
       positions: Position[]; orders: OrderRow[]; new_trades: Trade[]; account: Account; sessions: SessionRanges }
   | { type: "state"; state: string; speed: number }
@@ -36,6 +37,14 @@ export function initial(): State {
 }
 
 export const MAX_BARS = 6000;
+
+/**
+ * Bar data is per timeframe. A message built for a timeframe the user has already left (it was in flight when they
+ * switched) must not repaint the chart; the `view` reply for the current timeframe does that. Account, positions
+ * and trades from such a message are still valid and are applied by apply() regardless.
+ */
+export const drawsChart = (m: ServerMsg, tf: number): boolean =>
+  (m.type === "reset" || m.type === "view" || m.type === "tick") && m.tf === tf;
 
 /** Replay time (epoch s) after stepping forward to the end of the current/next `tf`-second candle. */
 export const nextCandleEnd = (now: number, tf: number) => (Math.floor(now / tf) + 1) * tf;
@@ -52,6 +61,9 @@ export function apply(s: State, m: ServerMsg): State {
       s.bars = m.history; s.forming = m.forming; s.positions = m.positions; s.orders = m.orders;
       s.trades = m.trades; s.account = m.account; s.sessions = m.sessions; s.ended = false;
       break;
+    case "view":    // the server switched this client to another timeframe: replace, never merge, its bars
+      s.bars = m.history; s.forming = m.forming;
+      break;
     case "tick":
       s.cursor = m.cursor; s.total = m.total; s.now = m.now;
       for (const [tf, nb] of Object.entries(m.closed)) {
@@ -59,7 +71,8 @@ export function apply(s: State, m: ServerMsg): State {
         for (const b of nb) if (!arr.length || b.t > arr[arr.length - 1].t) arr.push(b);
         if (arr.length > MAX_BARS) arr.splice(0, arr.length - MAX_BARS);   // keep memory bounded on long plays
       }
-      s.forming = m.forming; s.positions = m.positions; s.orders = m.orders;
+      Object.assign(s.forming, m.forming);      // the server sends only the viewed timeframe's forming bar
+      s.positions = m.positions; s.orders = m.orders;
       s.trades.push(...m.new_trades); s.account = m.account; s.sessions = m.sessions;
       break;
     case "state": s.playback = pb(m.state); s.speed = m.speed; break;
