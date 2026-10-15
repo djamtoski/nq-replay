@@ -29,6 +29,14 @@ python -m pytest -q          # engine, data, server
 cd web && npm test && npx tsc --noEmit
 ```
 
+## Drawing tools
+Left toolbar: trend line, ray, arrow, horizontal line/ray, vertical line, rectangle, ellipse, parallel
+channel, Fib retracement, long/short position (target, stop, R:R, $), measure, text, brush.
+Click-click or press-drag to draw; click a drawing to select, drag its body or handles; `Del` deletes,
+`Ctrl+Z` undoes, `Esc` cancels. Drawings are stored in time/price (not bar index), so they stay put across
+timeframes and can sit in the empty space right of "now". They persist per data source + contract in
+`localStorage` (`drawings:v1:<source>:<instrument>`). This is a core set, not all of TradingView's tools.
+
 ## Rules to keep replays correct
 * Orders/cancels/modifies/closes go through `ReplaySession.submit/cancel/modify/close`, never `session.broker.*`,
   so `step_back` can replay them. Strategy callbacks must follow the same rule.
