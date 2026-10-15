@@ -3,8 +3,11 @@ import { apply, bracket, fmt, initial, nextCandleEnd, prevCandleEnd, type Bar, t
 
 const API = (import.meta.env.VITE_API as string | undefined) ?? "http://127.0.0.1:8000";
 const TFS: [number, string][] = [[1, "1s"], [15, "15s"], [60, "1m"], [300, "5m"], [900, "15m"], [3600, "1h"], [14400, "4h"]];
-const SPEEDS = [1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600];   // replay seconds per real second
-const NY = "America/New_York";
+// Speed = candles of the CHART timeframe per real second (1 on a 1m chart = one minute passes each second).
+const CPS = [0.2, 0.5, 1, 2, 5, 10, 30];
+const cpsLabel = (v: number) => (v < 1 ? `1 candle / ${Math.round(1 / v)}s` : v === 1 ? "1 candle / s" : `${v} candles / s`);
+const MAX_REPLAY_RATE = 36_000;   // replay-seconds per real second the server can step (2000 bars x 20 frames/s, with margin)
+const PC_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 // ---- tiny safe localStorage wrapper (can throw in private windows)
@@ -24,7 +27,26 @@ let replayStart = 0;     // replay time (epoch s) of the first reset: the "now" 
 
 // ================================================================ chart
 const css = (v: string) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
-const nyTime = (t: number, o: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat("en-US", { timeZone: NY, hour12: false, ...o }).format(t * 1000);
+// Display zone: default is this PC's zone. Market data instants are absolute; only the label changes.
+let tzMode: string = store.get("tz", "pc");
+const zone = () => (tzMode === "pc" ? PC_ZONE : tzMode);
+const fmtCache = new Map<string, Intl.DateTimeFormat>();
+const tzTime = (t: number, o: Intl.DateTimeFormatOptions) => {
+  const key = zone() + JSON.stringify(o);
+  let f = fmtCache.get(key);
+  if (!f) { f = new Intl.DateTimeFormat("en-US", { timeZone: zone(), hour12: false, ...o }); fmtCache.set(key, f); }
+  return f.format(t * 1000);
+};
+const tzName = (t: number) => new Intl.DateTimeFormat("en-US", { timeZone: zone(), timeZoneName: "short" }).formatToParts(t * 1000).find((p) => p.type === "timeZoneName")?.value ?? "";
+const LONG: Intl.DateTimeFormatOptions = { weekday: "short", year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" };
+const longTime = (t: number) => `${tzTime(t, LONG)} ${tzName(t)}`;
+// lightweight-charts TickMarkType: 0 Year, 1 Month, 2 DayOfMonth, 3 Time, 4 TimeWithSeconds
+const tickFmt = (t: number, type: number) =>
+  type === 0 ? tzTime(t, { year: "numeric" })
+  : type === 1 ? tzTime(t, { month: "short", year: "numeric" })
+  : type === 2 ? tzTime(t, { month: "short", day: "numeric" })
+  : type === 3 ? tzTime(t, { hour: "2-digit", minute: "2-digit" })
+  : tzTime(t, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 const chart = createChart($("chart"), {
   autoSize: true,
@@ -32,9 +54,9 @@ const chart = createChart($("chart"), {
   grid: { vertLines: { color: css("--line") }, horzLines: { color: css("--line") } },
   crosshair: { mode: CrosshairMode.Normal },
   timeScale: { timeVisible: true, secondsVisible: true, borderColor: css("--line"), rightOffset: 10,
-    tickMarkFormatter: (t: number) => nyTime(t, { hour: "2-digit", minute: "2-digit" }) },
+    tickMarkFormatter: (t: number, type: number) => tickFmt(t, type) },
   rightPriceScale: { borderColor: css("--line"), scaleMargins: { top: 0.08, bottom: 0.12 } },
-  localization: { timeFormatter: (t: number) => nyTime(t, { weekday: "short", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }) + " NY" },
+  localization: { timeFormatter: (t: number) => longTime(t) },
 });
 const series = chart.addSeries(CandlestickSeries, {
   upColor: css("--buy"), downColor: css("--sell"), borderVisible: false,
@@ -109,17 +131,12 @@ const sideCls = (n: number) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
 const lastPrice = () => st.forming[tf]?.c ?? st.bars[tf]?.at(-1)?.c ?? st.forming["1"]?.c ?? null;
 
 function renderPanels(): void {
-  $("clock").textContent = st.now ? nyTime(st.now, { weekday: "short", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }) + " NY" : "";
+  $("clock").textContent = st.now ? longTime(st.now) : "";
   const el = Math.max(0, st.now - replayStart);
   $("pos").textContent = st.total ? `+${Math.floor(el / 3600)}h ${String(Math.floor((el % 3600) / 60)).padStart(2, "0")}m replayed${st.ended ? " · end of data" : ""}` : "";
   const play = $<HTMLButtonElement>("play");
   play.textContent = st.playback === "playing" ? "⏸" : "▶";
   play.disabled = st.ended;
-  const sp = $<HTMLSelectElement>("speed");
-  if (Number(sp.value) !== st.speed) {
-    if (!Array.from(sp.options).some((o) => Number(o.value) === st.speed)) sp.add(new Option(`${st.speed}×`, String(st.speed)));
-    sp.value = String(st.speed);
-  }
   $("err").textContent = st.lastError ?? "";
   const lp = lastPrice();
   $("buyPx").textContent = lp === null ? "" : fmt(lp);
@@ -158,7 +175,7 @@ function renderPanels(): void {
      <td>${o.status}</td><td><button data-cancel="${o.id}">Cancel</button></td></tr>`).join("") : empty(6, "No working orders");
 
   tbody("tTrades").innerHTML = st.trades.length ? st.trades.slice(-200).reverse().map((t) =>
-    `<tr><td>${nyTime(t.closed, { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })}</td>
+    `<tr><td>${tzTime(t.closed, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })}</td>
      <td>${t.side}</td><td>${t.qty}</td><td>${fmt(t.entry)}</td><td>${fmt(t.exit)}</td>
      <td class="${sideCls(t.pnl)}">${fmt(t.pnl)}</td><td>${fmt(t.r)}</td><td>${t.reason}</td></tr>`).join("") : empty(8, "No closed trades yet");
   renderLegend();
@@ -217,7 +234,7 @@ async function newSession(cfg: SessionCfg): Promise<string | null> {
   }
   const sock = new WebSocket(`${API.replace(/^http/, "ws")}/ws/${sid}`);
   ws = sock;
-  sock.onopen = () => setConn("connected", "on");
+  sock.onopen = () => { setConn("connected", "on"); syncSpeed(); };
   sock.onclose = () => { if (ws === sock) setConn("disconnected", "bad"); };
   sock.onmessage = (ev) => onMessage(ev.data as string);
   return null;
@@ -231,18 +248,37 @@ $("tfs").addEventListener("click", (e) => {
   if (!v || v === tf) return;
   tf = v; store.set("tf", v);
   document.querySelectorAll("#tfs button").forEach((b) => b.classList.toggle("active", Number((b as HTMLElement).dataset.tf) === v));
-  hover = null; redrawChart(); scheduleRender();
+  hover = null; redrawChart(); syncSpeed(); scheduleRender();
 });
 
 // replay dock
-$("speed").innerHTML = SPEEDS.map((v) => `<option value="${v}">${v}×</option>`).join("");
-($("speed") as HTMLSelectElement).value = "30";
+let cps: number = store.get("cps", 1);
+if (!CPS.includes(cps)) cps = 1;
+/** Rebuild the speed menu for the current timeframe: options the server can't keep up with are disabled. */
+function syncSpeed(): void {
+  const sp = $<HTMLSelectElement>("speed");
+  const ok = (v: number) => v * tf <= MAX_REPLAY_RATE;
+  if (!ok(cps)) cps = [...CPS].reverse().find(ok) ?? CPS[0];     // timeframe got bigger: step down to what's feasible
+  sp.innerHTML = CPS.map((v) => `<option value="${v}" ${ok(v) ? "" : "disabled"}>${cpsLabel(v)}${ok(v) ? "" : " (too fast)"}</option>`).join("");
+  sp.value = String(cps);
+  send({ cmd: "speed", value: cps * tf });
+}
 const togglePlay = () => send({ cmd: st.playback === "playing" ? "pause" : "play" });
 const stepCandle = (dir: 1 | -1) => send({ cmd: "seek", ts: dir > 0 ? nextCandleEnd(st.now, tf) : prevCandleEnd(st.now, tf) });
 $("play").onclick = togglePlay;
 $("nextCandle").onclick = () => stepCandle(1);
 $("prevCandle").onclick = () => stepCandle(-1);
-$<HTMLSelectElement>("speed").onchange = (e) => send({ cmd: "speed", value: Number((e.target as HTMLSelectElement).value) });
+$<HTMLSelectElement>("speed").onchange = (e) => { cps = Number((e.target as HTMLSelectElement).value); store.set("cps", cps); syncSpeed(); };
+
+// time zone selector: PC zone by default, or exchange (New York) / UTC
+const tzSel = $<HTMLSelectElement>("tz");
+tzSel.innerHTML = `<option value="pc">PC time (${PC_ZONE})</option><option value="America/New_York">New York</option><option value="UTC">UTC</option>`;
+tzSel.value = tzMode;
+tzSel.onchange = () => {
+  tzMode = tzSel.value; store.set("tz", tzMode); fmtCache.clear();
+  chart.applyOptions({ localization: { timeFormatter: (t: number) => longTime(t) }, timeScale: { tickMarkFormatter: (t: number, type: number) => tickFmt(t, type) } });
+  scheduleRender();
+};
 
 // header
 const toggleFullscreen = () => { if (document.fullscreenElement) void document.exitFullscreen(); else void document.documentElement.requestFullscreen?.(); };
