@@ -42,6 +42,22 @@ How ingest behaves (all covered by `test_nq_data_databento.py`):
 If Databento rejects a request (bad key, dates it does not have yet) you get a one-line message; days already
 downloaded are kept and the next run resumes after them. The key is read only from `DATABENTO_API_KEY`.
 
+## WebSocket protocol (`/ws/{session_id}?tf=<seconds>`)
+Bar data is sent **per client, for one timeframe only**: the one in `?tf=` (default 60 if the session has it,
+else its first timeframe). Switch with `{"cmd":"view","tf":300}`; the server replies `{"type":"view","tf",
+"history":{"300":[...]},"forming":{"300":{...}}}` and ticks then carry only that timeframe.
+
+| Server -> client | Notes |
+|---|---|
+| `reset` | on connect and after a step back: `tf`, `history`/`forming` for that tf, positions, orders, trades, account |
+| `view` | reply to `view`: new timeframe's history and forming bar |
+| `tick` | `tf`, `closed` (new bars of that tf only), `forming`, positions, orders, `new_trades`, account, sessions |
+| `state` / `end` / `order_ack` / `error` | same for every client |
+
+Client -> server commands: `play`, `pause`, `speed`, `step`, `step_back`, `seek`, `order`, `cancel`, `modify`,
+`close`, `view`. A message built for a timeframe the user has since left can still arrive; clients should not
+repaint the chart from it (see `drawsChart` in `web/src/store.ts`).
+
 ## Tests
 ```bash
 python -m pytest -q          # engine, data, server
