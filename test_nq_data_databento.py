@@ -1,4 +1,4 @@
-"""
+﻿"""
 Offline tests for the Databento path of nq_data.py.
 
 We cannot call Databento here (it needs a paid key), so a FakeHistorical serves a synthetic exchange dataset
@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import databento as db
@@ -170,7 +171,7 @@ def test_client_is_built_from_the_environment_key_and_never_printed(monkeypatch,
 
 # ---------------------------------------------------------------- end-to-end ingest correctness
 def all_rows_in_files(root):
-    return sorted(r for f in root.glob("NQ/1s/*/*.parquet") for r in pq.read_table(f).column("ts").to_pylist())
+    return sorted(r for f in root.glob("NQ.v.0/1s/*/*.parquet") for r in pq.read_table(f).column("ts").to_pylist())
 
 
 def test_every_bar_lands_in_exactly_one_day_file_across_the_dst_change(monkeypatch, root):
@@ -244,13 +245,13 @@ def test_failure_midway_keeps_finished_days_leaves_no_partial_files_and_resumes(
     fake = patch_client(monkeypatch, FakeHistorical(make_dataset(*WEEK_A), fail_on_call=3))
     with pytest.raises(ConnectionError):
         nd.ingest("NQ.v.0", *WEEK_A, root)
-    files = sorted(p.name for p in root.glob("NQ/1s/*/*"))
+    files = sorted(p.name for p in root.glob("NQ.v.0/1s/*/*"))
     assert files == ["2025-03-03.parquet", "2025-03-04.parquet"]           # the two completed days only, no *.tmp
     fake.fail_on_call = None
     fake.range_calls.clear()
     assert nd.ingest("NQ.v.0", *WEEK_A, root) == 3                         # resumes exactly the missing days
     assert len(fake.range_calls) == 3
-    assert len(list(root.glob("NQ/1s/*/*.parquet"))) == 5
+    assert len(list(root.glob("NQ.v.0/1s/*/*.parquet"))) == 5
 
 
 def test_weekend_only_range_makes_no_calls(monkeypatch, root):
@@ -322,8 +323,8 @@ def test_cli_turns_api_rejections_into_a_clear_message_and_keeps_finished_days(m
     out = run_cli(["ingest", "--start", "2025-03-03", "--end", "2025-03-07", "--yes"], monkeypatch, root)
     assert "Databento rejected the request" in out and "data_end_after_available_end" in out
     assert "Traceback" not in out and "re-run to resume" in out
-    assert len(list(root.glob("NQ/1s/*/*.parquet"))) == 2        # first two days are kept
-    assert not list(root.glob("NQ/1s/*/*.tmp"))
+    assert len(list(root.glob("NQ.v.0/1s/*/*.parquet"))) == 2        # first two days are kept
+    assert not list(root.glob("NQ.v.0/1s/*/*.tmp"))
 
 
 def test_cli_also_handles_a_rejection_at_the_cost_step(monkeypatch, root):
@@ -334,6 +335,187 @@ def test_cli_also_handles_a_rejection_at_the_cost_step(monkeypatch, root):
     patch_client(monkeypatch, BadKey([]))
     out = run_cli(["cost", "--start", "2025-03-03", "--end", "2025-03-03"], monkeypatch, root)
     assert "Databento rejected the request" in out and "invalid API key" in out and "Traceback" not in out
+
+
+# ---------------------------------------------------------------- review fixes
+def pin_now(monkeypatch, when):
+    monkeypatch.setattr(nd, "_utcnow", lambda: when)
+
+
+MAR4_CLOSE = datetime(2025, 3, 4, 22, 0, tzinfo=timezone.utc)           # Tue 17:00 EST
+
+
+def test_a_trading_day_that_has_not_finished_is_never_stored(monkeypatch, root, capsys):
+    fake = patch_client(monkeypatch, FakeHistorical(make_dataset(*WEEK_A)))
+    for now in (MAR4_CLOSE - timedelta(hours=2), MAR4_CLOSE + timedelta(hours=1, minutes=59)):     # open / not yet settled
+        pin_now(monkeypatch, now)
+        assert nd.ingest("NQ.v.0", date(2025, 3, 4), date(2025, 3, 4), root) == 0
+    assert fake.range_calls == [] and not list(root.glob("**/*.parquet"))
+    assert "not finished yet" in capsys.readouterr().out
+    plan = nd.plan_ingest("NQ.v.0", date(2025, 3, 4), date(2025, 3, 4), root)
+    assert plan.todo == [] and plan.unsettled == [date(2025, 3, 4)]
+    pin_now(monkeypatch, MAR4_CLOSE + SETTLE_PLUS)                                                  # settled: now it downloads
+    assert nd.ingest("NQ.v.0", date(2025, 3, 4), date(2025, 3, 4), root) == 1
+
+
+SETTLE_PLUS = nd.SETTLE + timedelta(seconds=1)
+
+
+def test_unfinished_days_are_left_out_of_the_cost_and_reported_by_the_cli(monkeypatch, root):
+    fake = patch_client(monkeypatch, FakeHistorical([], cost=3.0))
+    pin_now(monkeypatch, MAR4_CLOSE + timedelta(hours=1))                   # Mar 3 settled, Mar 4 not
+    out = run_cli(["cost", "--start", "2025-03-03", "--end", "2025-03-04"], monkeypatch, root)
+    assert "1 trading day(s) to download, 0 already on disk, 1 not finished yet" in out
+    assert len(fake.cost_calls) == 1
+    assert pd.Timestamp(fake.cost_calls[0]["end"]) == pd.Timestamp("2025-03-03 22:00:00+00:00")   # Mar 3's close only
+
+
+def test_different_symbols_never_share_files(monkeypatch, root):
+    fake = patch_client(monkeypatch, FakeHistorical(make_dataset(*WEEK_A)))
+    assert nd.ingest("NQ.v.0", date(2025, 3, 4), date(2025, 3, 4), root) == 1
+    assert nd.ingest("NQ.c.0", date(2025, 3, 4), date(2025, 3, 4), root) == 1      # not skipped as "already present"
+    assert [c["symbols"] for c in fake.range_calls] == [["NQ.v.0"], ["NQ.c.0"]]
+    assert nd.day_path(root, "NQ.v.0", date(2025, 3, 4)).exists() and nd.day_path(root, "NQ.c.0", date(2025, 3, 4)).exists()
+    assert nd.day_path(root, "NQ.v.0", date(2025, 3, 4)) != nd.day_path(root, "NQ.c.0", date(2025, 3, 4))
+    assert len(nd.load_bars("NQ.c.0", date(2025, 3, 4), date(2025, 3, 4), root)) > 0
+
+
+@pytest.mark.parametrize("bad", ["../x", "a/b", "", "NQ..v.0", "x" * 40, "-NQ", "a b", "C:\\x", "NQ/../../etc", ".hidden"])
+def test_symbols_that_could_escape_the_data_root_are_rejected(bad, monkeypatch, root):
+    patch_client(monkeypatch, FakeHistorical([]))
+    for call in (lambda: nd.day_path(root, bad, date(2025, 3, 4)),
+                 lambda: nd.ingest(bad, date(2025, 3, 4), date(2025, 3, 4), root),
+                 lambda: nd.load_bars(bad, date(2025, 3, 4), date(2025, 3, 4), root)):
+        with pytest.raises(ValueError, match="invalid symbol"):
+            call()
+    out = run_cli(["cost", f"--symbol={bad}", "--start", "2025-03-04", "--end", "2025-03-04"], monkeypatch, root)
+    assert "[exit 2]" in out and "invalid symbol" in out
+
+
+def test_cost_covers_only_the_days_that_would_be_downloaded(monkeypatch, root):
+    fake = patch_client(monkeypatch, FakeHistorical(make_dataset(*WEEK_A), cost=1.5))
+    nd.ingest("NQ.v.0", date(2025, 3, 3), date(2025, 3, 5), root)
+    fake.cost_calls.clear()
+    assert nd.cost("NQ.v.0", *WEEK_A, root) == 1.5                                   # only Thu 6 + Fri 7 remain: one window
+    (kw,) = fake.cost_calls
+    assert pd.Timestamp(kw["start"]) == pd.Timestamp("2025-03-05 23:00:00+00:00")   # Thu 6's session starts Wed 18:00 EST
+    assert pd.Timestamp(kw["end"]) == pd.Timestamp("2025-03-07 22:00:00+00:00")
+    nd.ingest("NQ.v.0", *WEEK_A, root)
+    fake.cost_calls.clear()
+    assert nd.cost("NQ.v.0", *WEEK_A, root) == 0.0 and fake.cost_calls == []        # nothing left: nothing priced
+
+
+def test_cost_prices_separate_windows_for_separated_missing_days(monkeypatch, root):
+    fake = patch_client(monkeypatch, FakeHistorical(make_dataset(*WEEK_A), cost=1.5))
+    nd.ingest("NQ.v.0", date(2025, 3, 4), date(2025, 3, 4), root)                    # Tue exists; Mon and Wed..Fri missing
+    fake.cost_calls.clear()
+    assert nd.cost("NQ.v.0", *WEEK_A, root) == 3.0                                   # Mon | Wed-Fri = two requests
+    assert len(fake.cost_calls) == 2
+
+
+def test_friday_and_monday_are_one_contiguous_window(monkeypatch, root):
+    fake = patch_client(monkeypatch, FakeHistorical([], cost=2.0))
+    nd.cost("NQ.v.0", date(2025, 3, 7), date(2025, 3, 10), root)
+    assert len(fake.cost_calls) == 1                                                 # no pointless split at the weekend
+
+
+def test_force_prices_and_downloads_everything_again(monkeypatch, root):
+    fake = patch_client(monkeypatch, FakeHistorical(make_dataset(*WEEK_A), cost=1.0))
+    nd.ingest("NQ.v.0", *WEEK_A, root)
+    fake.cost_calls.clear()
+    assert nd.cost("NQ.v.0", *WEEK_A, root, force=True) == 1.0 and len(fake.cost_calls) == 1
+
+
+def test_cli_reports_how_much_is_left_and_skips_the_prompt_when_nothing_is(monkeypatch, root):
+    fake = patch_client(monkeypatch, FakeHistorical(make_dataset(*WEEK_A), cost=2.0))
+    nd.ingest("NQ.v.0", date(2025, 3, 3), date(2025, 3, 4), root)
+    out = run_cli(["cost", "--start", "2025-03-03", "--end", "2025-03-05"], monkeypatch, root)
+    assert "1 trading day(s) to download, 2 already on disk" in out
+    fake.cost_calls.clear(); fake.range_calls.clear()
+    nd.ingest("NQ.v.0", *WEEK_A, root)
+    out = run_cli(["ingest", "--start", "2025-03-03", "--end", "2025-03-07"], monkeypatch, root)   # no answers supplied: no prompt
+    assert "nothing to download" in out and fake.cost_calls == []
+
+
+def test_yes_has_a_default_spending_ceiling_and_max_cost_overrides_it(monkeypatch, root):
+    fake = patch_client(monkeypatch, FakeHistorical(make_dataset(*WEEK_A), cost=100.0))
+    args = ["ingest", "--start", "2025-03-03", "--end", "2025-03-03"]
+    out = run_cli(args + ["--yes"], monkeypatch, root)
+    assert "above the $25.00 limit" in out and "--max-cost" in out and fake.range_calls == []
+    out = run_cli(args + ["--yes", "--max-cost", "50"], monkeypatch, root)
+    assert "above the $50.00 limit" in out and fake.range_calls == []
+    out = run_cli(args + ["--yes", "--max-cost", "150"], monkeypatch, root)
+    assert "done: 1 day(s) written" in out
+
+
+def test_interactive_runs_have_no_default_ceiling_but_honour_an_explicit_one(monkeypatch, root):
+    fake = patch_client(monkeypatch, FakeHistorical(make_dataset(*WEEK_A), cost=100.0))
+    args = ["ingest", "--start", "2025-03-03", "--end", "2025-03-03"]
+    assert "Estimated Databento cost: $100.00" in run_cli(args, monkeypatch, root, answers=["n"])      # shown, user decides
+    out = run_cli(args + ["--max-cost", "10"], monkeypatch, root, answers=["y"])
+    assert "above the $10.00 limit" in out and fake.range_calls == []
+    assert "done: 1 day(s) written" in run_cli(args, monkeypatch, root, answers=["y"])
+
+
+def test_a_non_interactive_run_without_yes_aborts_instead_of_crashing(monkeypatch, root):
+    fake = patch_client(monkeypatch, FakeHistorical(make_dataset(*WEEK_A), cost=2.0))
+    monkeypatch.setattr("builtins.input", lambda *_: (_ for _ in ()).throw(EOFError()))
+    buf = io.StringIO()
+    with redirect_stdout(buf), redirect_stderr(buf):
+        nd.main(["ingest", "--start", "2025-03-03", "--end", "2025-03-03", "--root", str(root)])
+    assert "aborted" in buf.getvalue() and "Traceback" not in buf.getvalue() and fake.range_calls == []
+
+
+@pytest.mark.parametrize("where, offset_s", [("exactly at the exclusive end", 0), ("a few seconds after the end", 5), ("one second before the start", -1)])
+def test_bars_outside_the_requested_window_are_rejected_and_nothing_is_written(monkeypatch, root, where, offset_s):
+    class Leaky(FakeHistorical):
+        def get_range(self, **kw):
+            self.range_calls.append(kw)
+            s, e = (int(pd.Timestamp(kw[k]).value) for k in ("start", "end"))
+            stray = (s if offset_s < 0 else e) + offset_s * S                 # one stray bar next to the window edge
+            rows = [r for r in self.rows if s <= r["ts"] < e] + [{"ts": stray, "iid": 100, "px": 20001.0}]
+            return dbn_store(rows, s, e)
+
+    patch_client(monkeypatch, Leaky(make_dataset(*WEEK_A)))
+    with pytest.raises(ValueError, match="outside the requested window"):
+        nd.ingest("NQ.v.0", date(2025, 3, 4), date(2025, 3, 4), root)
+    assert not list(root.glob("**/*.parquet")) and not list(root.glob("**/*.tmp"))
+
+
+def test_bars_exactly_on_the_inclusive_start_and_just_before_the_end_are_accepted(monkeypatch, root):
+    rows = make_dataset(*WEEK_A)
+    s, e = nd.trading_day_window_utc(date(2025, 3, 4))
+    edge = [r for r in rows if ns(s) <= r["ts"] < ns(e)]
+    assert edge[0]["ts"] == ns(s) and edge[-1]["ts"] == ns(e) - S                 # the dataset really includes both edges
+    patch_client(monkeypatch, FakeHistorical(rows))
+    assert nd.ingest("NQ.v.0", date(2025, 3, 4), date(2025, 3, 4), root) == 1
+
+
+def test_temp_files_are_unique_per_write_and_removed_on_failure(monkeypatch, tmp_path):
+    tbl = nd.frame_to_table(dbn_store([{"ts": ns(datetime(2025, 3, 10, 13, 30, tzinfo=timezone.utc)), "iid": 1, "px": 1.0}],
+                                      0, 1).to_df(price_type="float", pretty_ts=True))
+    target = tmp_path / "d" / "2025-03-10.parquet"
+    seen = []
+    real = pq.write_table
+
+    def spy(table, where, **kw):
+        seen.append(Path(where).name)
+        return real(table, where, **kw)
+
+    monkeypatch.setattr(nd.pq, "write_table", spy)
+    nd.write_day(tbl, target); nd.write_day(tbl, target)
+    assert len(set(seen)) == 2 and all(n.endswith(".tmp") and n.startswith("2025-03-10.") for n in seen)   # distinct per write
+    assert [p.name for p in target.parent.iterdir()] == ["2025-03-10.parquet"]
+
+    def boom(table, where, **kw):
+        real(table, where, **kw)
+        raise OSError("disk full after writing")
+
+    monkeypatch.setattr(nd.pq, "write_table", boom)
+    other = tmp_path / "d" / "2025-03-11.parquet"
+    with pytest.raises(OSError):
+        nd.write_day(tbl, other)
+    assert not other.exists() and not list(target.parent.glob("*.tmp"))                    # the half-written temp is cleaned up
 
 
 def test_api_key_never_appears_in_any_cli_output(monkeypatch, root):

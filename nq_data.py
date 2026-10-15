@@ -18,13 +18,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
+import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from nq_replay import NQ, Bar, ExecModel, Instrument, ReplaySession
@@ -32,6 +36,13 @@ from nq_replay import NQ, Bar, ExecModel, Instrument, ReplaySession
 NY = ZoneInfo("America/New_York")
 DATASET = "GLBX.MDP3"
 DEFAULT_ROOT = Path(__file__).parent / "data" / "bars"
+SETTLE = timedelta(hours=2)            # a trading day is only downloaded this long after its 17:00 NY close
+DEFAULT_YES_LIMIT_USD = 25.0           # --yes without --max-cost refuses estimates above this
+# One rule, reused by the API's request model. No lookahead (pydantic's regex engine has none): a '.' must be
+# followed by a normal character, which rules out '..', a leading/trailing dot and so any path escape.
+SYMBOL_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9_-]|\.[A-Za-z0-9_-])*$"
+SYMBOL_MAX = 32
+SYMBOL_RE = re.compile(SYMBOL_PATTERN)
 SCHEMA = pa.schema([
     ("ts", pa.int64()), ("o", pa.float64()), ("h", pa.float64()), ("l", pa.float64()),
     ("c", pa.float64()), ("v", pa.int64()), ("instrument_id", pa.uint32()),   # Databento ids are uint32 (can exceed 2**31)
@@ -39,8 +50,20 @@ SCHEMA = pa.schema([
 
 
 # ------------------------------------------------------------------ paths / calendar
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)      # one seam so tests can pin "now"
+
+
+def check_symbol(symbol: str) -> str:
+    """Symbols become directory names, so reject anything that could escape the data root."""
+    if len(symbol) > SYMBOL_MAX or not SYMBOL_RE.fullmatch(symbol):
+        raise ValueError(f"invalid symbol {symbol!r}: use letters, digits, '.', '_' or '-' (e.g. NQ.v.0)")
+    return symbol
+
+
 def day_path(root: Path, symbol: str, d: date) -> Path:
-    return Path(root) / symbol.split(".")[0] / "1s" / f"{d.year}" / f"{d.isoformat()}.parquet"
+    # The FULL symbol is the directory: NQ.v.0 (volume roll), NQ.c.0 (calendar roll) and NQ.v.1 are different series
+    return Path(root) / check_symbol(symbol) / "1s" / f"{d.year}" / f"{d.isoformat()}.parquet"
 
 
 def trading_days(start: date, end: date) -> Iterable[date]:
@@ -89,26 +112,91 @@ def frame_to_table(df) -> pa.Table:
 
 def write_day(table: pa.Table, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    pq.write_table(table, tmp, compression="zstd", row_group_size=3600)
-    tmp.replace(path)  # atomic: a crash never leaves a half-written day behind
+    # unique temp name: two ingests of the same day (two terminals) must not write the same temp file
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}-{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        pq.write_table(table, tmp, compression="zstd", row_group_size=3600)
+        tmp.replace(path)  # atomic: a crash never leaves a half-written day behind
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
-def cost(symbol: str, start: date, end: date) -> float:
-    s, _ = trading_day_window_utc(start)
-    _, e = trading_day_window_utc(end)
-    return _client().metadata.get_cost(
-        dataset=DATASET, symbols=[symbol], stype_in="continuous", schema="ohlcv-1s",
-        start=s.isoformat(), end=e.isoformat())
+# ------------------------------------------------------------------ planning (what would actually be downloaded)
+@dataclass(frozen=True)
+class Plan:
+    todo: list[date]          # settled trading days with no file (or all of them with force)
+    have: int                 # already on disk (skipped)
+    unsettled: list[date]     # trading day not finished + SETTLE ago: data may still be incomplete
+
+
+def plan_ingest(symbol: str, start: date, end: date, root: Path = DEFAULT_ROOT, force: bool = False) -> Plan:
+    """
+    The single source of truth for both the cost estimate and the download, so the price shown is for the days
+    that will really be fetched. A day still open (or just closed) is never stored: it would be partial, and
+    because existing files are skipped on later runs it would stay partial forever.
+    """
+    now = _utcnow()
+    todo: list[date] = []
+    unsettled: list[date] = []
+    have = 0
+    for d in trading_days(start, end):
+        if trading_day_window_utc(d)[1] + SETTLE > now:
+            unsettled.append(d)
+        elif day_path(root, symbol, d).exists() and not force:
+            have += 1
+        else:
+            todo.append(d)
+    return Plan(todo, have, unsettled)
+
+
+def _next_trading_day(d: date) -> date:
+    n = d + timedelta(days=1)
+    return n + timedelta(days=7 - n.weekday()) if n.weekday() >= 5 else n
+
+
+def _runs(days: list[date]) -> list[list[date]]:
+    """Group consecutive trading days so each priced request is one contiguous window."""
+    out: list[list[date]] = []
+    for d in days:
+        if out and _next_trading_day(out[-1][-1]) == d:
+            out[-1].append(d)
+        else:
+            out.append([d])
+    return out
+
+
+def cost(symbol: str, start: date, end: date, root: Path = DEFAULT_ROOT, force: bool = False) -> float:
+    """USD estimate for the days ingest() would download (not the whole range)."""
+    client = _client()
+    total = 0.0
+    for run in _runs(plan_ingest(symbol, start, end, root, force).todo):
+        s, _ = trading_day_window_utc(run[0])
+        _, e = trading_day_window_utc(run[-1])
+        total += client.metadata.get_cost(
+            dataset=DATASET, symbols=[symbol], stype_in="continuous", schema="ohlcv-1s",
+            start=s.isoformat(), end=e.isoformat())
+    return total
+
+
+def _check_window(table: pa.Table, s: datetime, e: datetime, d: date) -> None:
+    """Refuse to file bars under a day they don't belong to (would show up later as overlapping duplicates)."""
+    mm = pc.min_max(table["ts"]).as_py()
+    lo, hi = int(s.timestamp()) * 10**9, int(e.timestamp()) * 10**9
+    if mm["min"] < lo or mm["max"] >= hi:
+        raise ValueError(f"{d}: the API returned bars outside the requested window "
+                         f"{s.isoformat()} .. {e.isoformat()}; nothing was written for this day")
 
 
 def ingest(symbol: str, start: date, end: date, root: Path = DEFAULT_ROOT, force: bool = False) -> int:
-    """Download missing trading days. Resumable: existing files are skipped unless force."""
+    """Download missing, finished trading days. Resumable: existing files are skipped unless force."""
+    check_symbol(symbol)
     client, n = _client(), 0
-    for d in trading_days(start, end):
+    plan = plan_ingest(symbol, start, end, root, force)
+    for d in plan.unsettled:
+        print(f"{d}: skipped, trading day not finished yet (available {SETTLE} after its 17:00 NY close)")
+    for d in plan.todo:
         p = day_path(root, symbol, d)
-        if p.exists() and not force:
-            continue
         s, e = trading_day_window_utc(d)
         store = client.timeseries.get_range(
             dataset=DATASET, symbols=[symbol], stype_in="continuous", schema="ohlcv-1s",
@@ -117,7 +205,9 @@ def ingest(symbol: str, start: date, end: date, root: Path = DEFAULT_ROOT, force
         if df.empty:
             print(f"{d}: no data (holiday?)")
             continue
-        write_day(frame_to_table(df), p)
+        table = frame_to_table(df)
+        _check_window(table, s, e, d)
+        write_day(table, p)
         n += 1
         print(f"{d}: {len(df):,} bars -> {p}")
     return n
@@ -180,19 +270,38 @@ def main(argv=None) -> None:
     ap.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--yes", action="store_true", help="skip the cost confirmation prompt")
+    ap.add_argument("--max-cost", type=float, metavar="USD",
+                    help=f"refuse to download if the estimate is above this (with --yes the default is ${DEFAULT_YES_LIMIT_USD:.0f})")
     a = ap.parse_args(argv)
     if a.cmd == "info":
         return info(a.root)
     if not (a.start and a.end):
         ap.error("--start and --end are required")
+    try:
+        check_symbol(a.symbol)
+    except ValueError as e:
+        ap.error(str(e))
     import databento as db       # lazy: the loader/engine must stay importable without the API client
     try:
-        usd = cost(a.symbol, a.start, a.end)
-        print(f"Estimated Databento cost: ${usd:,.2f} for {a.symbol} {a.start}..{a.end}")
+        plan = plan_ingest(a.symbol, a.start, a.end, a.root, a.force)
+        print(f"{len(plan.todo)} trading day(s) to download, {plan.have} already on disk"
+              + (f", {len(plan.unsettled)} not finished yet (skipped)" if plan.unsettled else ""))
+        if not plan.todo:
+            return print("nothing to download")
+        usd = cost(a.symbol, a.start, a.end, a.root, a.force)
+        print(f"Estimated Databento cost: ${usd:,.2f} for {a.symbol} (the {len(plan.todo)} day(s) above)")
         if a.cmd == "cost":
             return
-        if not a.yes and input("Proceed? [y/N] ").strip().lower() != "y":
-            return print("aborted")
+        limit = a.max_cost if a.max_cost is not None else (DEFAULT_YES_LIMIT_USD if a.yes else None)
+        if limit is not None and usd > limit:
+            sys.exit(f"Estimated ${usd:,.2f} is above the ${limit:,.2f} limit; re-run with --max-cost {usd:,.0f} (or more) to allow it.")
+        if not a.yes:
+            try:
+                answer = input("Proceed? [y/N] ")
+            except EOFError:                       # non-interactive (CI, redirected stdin): never proceed silently
+                answer = ""
+            if answer.strip().lower() != "y":
+                return print("aborted")
         print(f"done: {ingest(a.symbol, a.start, a.end, a.root, a.force)} day(s) written")
     except db.BentoError as e:
         # bad key / quota / dates the service doesn't have yet: a clear message, not a traceback.
