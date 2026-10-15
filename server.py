@@ -401,7 +401,7 @@ def create_session(req: CreateSession) -> dict:
         raise HTTPException(429, "too many sessions")
     sid = uuid.uuid4().hex[:12]
     ss = _build(req)
-    ss.speed = 30.0       # 30 replay-seconds per real second: a 1m candle every 2s. 1x on 1s data is glacial
+    ss.speed = 60.0       # initial only (replay-seconds per real second); the UI sends its own on connect
     RUNTIMES[sid] = Runtime(sid, ss)
     return {"id": sid, "bars": len(ss.bars), "first": ss.bars[0].ts // S, "last": ss.bars[-1].ts // S,
             "start_cursor": ss.cursor}

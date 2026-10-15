@@ -1,12 +1,9 @@
 import { CandlestickSeries, ColorType, createChart, CrosshairMode, LineStyle, type CandlestickData, type IPriceLine, type UTCTimestamp } from "lightweight-charts";
 import { apply, bracket, fmt, initial, nextCandleEnd, prevCandleEnd, type Bar, type ServerMsg, type State } from "./store";
+import { CPS, cpsLabel, effectiveCps, feasible, replayRate } from "./speed";
 
 const API = (import.meta.env.VITE_API as string | undefined) ?? "http://127.0.0.1:8000";
 const TFS: [number, string][] = [[1, "1s"], [15, "15s"], [60, "1m"], [300, "5m"], [900, "15m"], [3600, "1h"], [14400, "4h"]];
-// Speed = candles of the CHART timeframe per real second (1 on a 1m chart = one minute passes each second).
-const CPS = [0.2, 0.5, 1, 2, 5, 10, 30];
-const cpsLabel = (v: number) => (v < 1 ? `1 candle / ${Math.round(1 / v)}s` : v === 1 ? "1 candle / s" : `${v} candles / s`);
-const MAX_REPLAY_RATE = 36_000;   // replay-seconds per real second the server can step (2000 bars x 20 frames/s, with margin)
 const PC_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -28,7 +25,9 @@ let replayStart = 0;     // replay time (epoch s) of the first reset: the "now" 
 // ================================================================ chart
 const css = (v: string) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 // Display zone: default is this PC's zone. Market data instants are absolute; only the label changes.
+const TZ_CHOICES = ["pc", "America/New_York", "UTC"];
 let tzMode: string = store.get("tz", "pc");
+if (!TZ_CHOICES.includes(tzMode)) tzMode = "pc";     // a bad stored value would make Intl throw RangeError
 const zone = () => (tzMode === "pc" ? PC_ZONE : tzMode);
 const fmtCache = new Map<string, Intl.DateTimeFormat>();
 const tzTime = (t: number, o: Intl.DateTimeFormatOptions) => {
@@ -37,7 +36,12 @@ const tzTime = (t: number, o: Intl.DateTimeFormatOptions) => {
   if (!f) { f = new Intl.DateTimeFormat("en-US", { timeZone: zone(), hour12: false, ...o }); fmtCache.set(key, f); }
   return f.format(t * 1000);
 };
-const tzName = (t: number) => new Intl.DateTimeFormat("en-US", { timeZone: zone(), timeZoneName: "short" }).formatToParts(t * 1000).find((p) => p.type === "timeZoneName")?.value ?? "";
+const nameFmt = new Map<string, Intl.DateTimeFormat>();     // one formatter per zone (construction is slow)
+const tzName = (t: number) => {
+  let f = nameFmt.get(zone());
+  if (!f) { f = new Intl.DateTimeFormat("en-US", { timeZone: zone(), timeZoneName: "short" }); nameFmt.set(zone(), f); }
+  return f.formatToParts(t * 1000).find((p) => p.type === "timeZoneName")?.value ?? "";
+};
 const LONG: Intl.DateTimeFormatOptions = { weekday: "short", year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" };
 const longTime = (t: number) => `${tzTime(t, LONG)} ${tzName(t)}`;
 // lightweight-charts TickMarkType: 0 Year, 1 Month, 2 DayOfMonth, 3 Time, 4 TimeWithSeconds
@@ -252,23 +256,22 @@ $("tfs").addEventListener("click", (e) => {
 });
 
 // replay dock
-let cps: number = store.get("cps", 1);
-if (!CPS.includes(cps)) cps = 1;
-/** Rebuild the speed menu for the current timeframe: options the server can't keep up with are disabled. */
+let cpsPref: number = store.get("cps", 1);       // what the user chose; never overwritten by clamping
+if (!CPS.includes(cpsPref)) cpsPref = 1;
+/** Rebuild the speed menu for the current timeframe (options the server can't keep up with are disabled) and tell the server. */
 function syncSpeed(): void {
   const sp = $<HTMLSelectElement>("speed");
-  const ok = (v: number) => v * tf <= MAX_REPLAY_RATE;
-  if (!ok(cps)) cps = [...CPS].reverse().find(ok) ?? CPS[0];     // timeframe got bigger: step down to what's feasible
-  sp.innerHTML = CPS.map((v) => `<option value="${v}" ${ok(v) ? "" : "disabled"}>${cpsLabel(v)}${ok(v) ? "" : " (too fast)"}</option>`).join("");
+  const cps = effectiveCps(cpsPref, tf);
+  sp.innerHTML = CPS.map((v) => `<option value="${v}" ${feasible(v, tf) ? "" : "disabled"}>${cpsLabel(v)}${feasible(v, tf) ? "" : " (too fast)"}</option>`).join("");
   sp.value = String(cps);
-  send({ cmd: "speed", value: cps * tf });
+  send({ cmd: "speed", value: replayRate(cps, tf) });
 }
 const togglePlay = () => send({ cmd: st.playback === "playing" ? "pause" : "play" });
 const stepCandle = (dir: 1 | -1) => send({ cmd: "seek", ts: dir > 0 ? nextCandleEnd(st.now, tf) : prevCandleEnd(st.now, tf) });
 $("play").onclick = togglePlay;
 $("nextCandle").onclick = () => stepCandle(1);
 $("prevCandle").onclick = () => stepCandle(-1);
-$<HTMLSelectElement>("speed").onchange = (e) => { cps = Number((e.target as HTMLSelectElement).value); store.set("cps", cps); syncSpeed(); };
+$<HTMLSelectElement>("speed").onchange = (e) => { cpsPref = Number((e.target as HTMLSelectElement).value); store.set("cps", cpsPref); syncSpeed(); };
 
 // time zone selector: PC zone by default, or exchange (New York) / UTC
 const tzSel = $<HTMLSelectElement>("tz");
