@@ -14,6 +14,7 @@
       <span class="sep"></span>
       <div id="tfs" class="seg" role="group" aria-label="Timeframe"></div>
       <span class="spacer"></span>
+      <select id="tz" aria-label="Time zone" title="Time zone used for the clock, axis and trade times"></select>
       <span id="conn" class="pill">connecting…</span>
       <button id="newSession" title="Start a new session">New session…</button>
       <button id="togglePanels" title="Hide/show side panel and positions (chart focus)">Focus</button>
@@ -32,7 +33,7 @@
             <button id="play" class="primary" title="Play / pause (Space)">▶</button>
             <button id="nextCandle" title="Forward one candle (→)">⏭</button>
             <span class="vsep"></span>
-            <label class="speed" title="Replay seconds per real second">
+            <label class="speed" title="Candles of the chart timeframe that play per real second">
               <select id="speed" aria-label="Replay speed"></select>
             </label>
             <span class="vsep"></span>
