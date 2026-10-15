@@ -42,7 +42,8 @@ export class DrawingManager {
   private style: Style = { ...DEFAULT_STYLE };
   private storageKey = "";
   private editingId: string | null = null;
-  private claimed = false;                       // we own the current gesture: keep the chart from also panning
+  private readonly ac = new AbortController();
+  private claimed = false;                      // we own the current gesture: keep the chart from also panning
   private tol = HIT_TOL;                         // hit tolerance for the current pointer type
   private lastTap: { id: string; t: number; x: number; y: number } | null = null;
   private gesture: { id: number; t: number } | null = null;   // the pointer that owns the current press-drag-release
@@ -158,6 +159,7 @@ export class DrawingManager {
   // ------------------------------------------------------------------ pointer handling
   private bind(): void {
     const c = this.o.container;
+    const signal = this.ac.signal;      // aborting it in destroy() removes every listener below at once
     // Pointer Events cover mouse, touch and pen with one code path. touch-action:none stops the browser
     // from scrolling/zooming the page (and cancelling our pointer stream) while a finger drags on the chart.
     // (Trade-off: this also stops the browser scrolling/zooming the page by dragging on the chart; the chart
@@ -168,26 +170,37 @@ export class DrawingManager {
     c.style.userSelect = "none";
     c.style.setProperty("-webkit-user-select", "none");
     c.style.setProperty("-webkit-touch-callout", "none");
-    c.addEventListener("contextmenu", (e) => { if (this.gesture || this.claimed) e.preventDefault(); });
-    c.addEventListener("pointerdown", (e) => this.onDown(e), { capture: true });
-    window.addEventListener("pointermove", (e) => this.onMove(e));
-    window.addEventListener("pointerup", (e) => this.onUp(e));
+    c.addEventListener("contextmenu", (e) => { if (this.gesture || this.claimed) e.preventDefault(); }, { signal });
+    c.addEventListener("pointerdown", (e) => this.onDown(e), { capture: true, signal });
+    window.addEventListener("pointermove", (e) => this.onMove(e), { signal });
+    window.addEventListener("pointerup", (e) => this.onUp(e), { signal });
     // Only OUR pointer's cancellation abandons the gesture (not a scroll elsewhere on the page); losing the
     // window mid-gesture (alt-tab, system dialog) loses the pointerup, so abandon it then too.
-    window.addEventListener("pointercancel", (e) => { if (this.gesture && e.pointerId === this.gesture.id) this.abort(); });
-    window.addEventListener("blur", () => { if (this.gesture) this.abort(); });
+    window.addEventListener("pointercancel", (e) => { if (this.gesture && e.pointerId === this.gesture.id) this.abort(); }, { signal });
+    window.addEventListener("blur", () => { if (this.gesture) this.abort(); }, { signal });
     // The chart library has its own mouse/touch handlers that pointer events don't reach: while we own a
     // gesture, stop those events at the container so the chart doesn't pan underneath a drawing drag.
     for (const type of ["mousedown", "touchstart", "touchmove"]) {
-      c.addEventListener(type, (e) => { if (this.claimed) e.stopPropagation(); }, { capture: true });
+      c.addEventListener(type, (e) => { if (this.claimed) e.stopPropagation(); }, { capture: true, signal });
     }
-    document.addEventListener("keydown", (e) => this.onKey(e));
+    document.addEventListener("keydown", (e) => this.onKey(e), { signal });
     this.o.textInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.commitText(true);
       else if (e.key === "Escape") this.commitText(false);
       e.stopPropagation();
-    });
-    this.o.textInput.addEventListener("blur", () => this.commitText(true));
+    }, { signal });
+    this.o.textInput.addEventListener("blur", () => this.commitText(true), { signal });
+  }
+
+  /** Detach from the chart and remove every listener (hot reload, tests, or replacing the chart). */
+  destroy(): void {
+    this.ac.abort();
+    window.clearTimeout(this.releaseTimer);
+    this.o.series.detachPrimitive(this.primitive);
+    this.requestUpdate = null;
+    const s = this.o.container.style;
+    s.touchAction = ""; s.cursor = ""; s.userSelect = "";
+    s.removeProperty("-webkit-user-select"); s.removeProperty("-webkit-touch-callout");
   }
 
   /**
@@ -315,7 +328,12 @@ export class DrawingManager {
     if (!e.isPrimary || !this.own(e)) return;
     this.release();
     if (this.drag) {
-      if (this.drag.moved) this.save();
+      if (this.drag.moved) {
+        // a finger can lift somewhere new without a final pointermove: honour the release position too
+        const m = this.mouse(e);
+        if (m) this.dragTo(m);
+        this.save();
+      }
       this.drag = null; return;
     }
     if (this.brushing) {
@@ -443,7 +461,7 @@ export class DrawingManager {
       if (b.dataset.tool) this.setTool(b.dataset.tool as ToolId);
       else if (b.dataset.act === "eye") { this.visible = !this.visible; this.syncUi(); this.redraw(); }
       else if (b.dataset.act === "trash") this.clearAll();
-    });
+    }, { signal: this.ac.signal });
   }
   private syncUi(): void {
     this.o.toolbar.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.classList.toggle("active", b.dataset.tool === this.tool));
