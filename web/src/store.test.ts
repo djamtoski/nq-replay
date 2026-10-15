@@ -55,6 +55,23 @@ describe("store", () => {
     expect(prevCandleEnd(120, 60)).toBe(60);
     expect(nextCandleEnd(7, 1)).toBe(8);
   });
+  it("view message replaces the bars with the new timeframe's only", () => {
+    const s = apply(initial(), reset());
+    apply(s, { type: "view", tf: 300, history: { "300": [bar(0), bar(300)] }, forming: { "300": bar(600) } });
+    expect(Object.keys(s.bars)).toEqual(["300"]);
+    expect(s.bars["300"]).toHaveLength(2);
+    expect(s.forming["60"]).toBeUndefined();
+    expect(s.forming["300"]?.t).toBe(600);
+  });
+  it("ticks only touch the timeframes they carry", () => {
+    const s = apply(initial(), reset());
+    apply(s, { type: "view", tf: 300, history: { "300": [bar(0)] }, forming: { "300": bar(300) } });
+    apply(s, tick({ "300": [bar(300)] }, { forming: { "300": bar(600) } }));
+    apply(s, tick({}, { forming: { "300": bar(600, 105) } }));
+    expect(s.bars["300"].map((b) => b.t)).toEqual([0, 300]);
+    expect(s.forming["300"]?.c).toBe(105);
+    expect(s.bars["60"]).toBeUndefined();
+  });
   it("trims very long histories", () => {
     const s = apply(initial(), reset());
     const many = Array.from({ length: MAX_BARS + 50 }, (_, i) => bar(1000 + i * 60));

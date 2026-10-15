@@ -17,6 +17,7 @@ import logging
 import math
 import random
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
 from typing import Annotated, Literal, Optional, Union
@@ -178,8 +179,14 @@ class CmdClose(BaseModel):
     qty: Optional[int] = Field(None, ge=1)
 
 
+class CmdView(BaseModel):
+    """Declare which timeframe (seconds) this client is displaying; the server then sends only that one."""
+    cmd: Literal["view"]
+    tf: int = Field(gt=0)
+
+
 Cmd = Annotated[Union[CmdPlay, CmdPause, CmdSpeed, CmdStep, CmdStepBack, CmdSeek, CmdOrder,
-                      CmdCancel, CmdModify, CmdClose], Field(discriminator="cmd")]
+                      CmdCancel, CmdModify, CmdClose, CmdView], Field(discriminator="cmd")]
 _cmd = TypeAdapter(Cmd)
 
 
@@ -208,13 +215,20 @@ def _trade(t) -> dict:
 
 
 # --------------------------------------------------------------------------- session runtime
+@dataclass
+class Client:
+    """One connected browser tab. Bar data is sent per client: only for the timeframe it displays."""
+    ws: WebSocket
+    tf: int
+    sent_ts: int = -1        # open time (ns) of the newest closed bar of `tf` this client already has
+    sent_trades: int = 0
+
+
 class Runtime:
     def __init__(self, sid: str, ss: ReplaySession):
         self.id, self.ss = sid, ss
-        self.clients: set[WebSocket] = set()
+        self.clients: dict[WebSocket, Client] = {}
         self.task: Optional[asyncio.Task] = None
-        self._sent_trades = 0
-        self._sent_tf: dict[int, int] = {}
 
     # ---- messages
     def account(self) -> dict:
@@ -226,48 +240,66 @@ class Runtime:
         a = self.ss.asia
         return {"asia": {"hi": _finite(a.high), "lo": _finite(a.low)}}
 
-    def reset_msg(self) -> dict:
+    def _history(self, c: Client) -> tuple[dict, dict]:
+        """History + forming bar for the client's timeframe only; marks them as sent."""
+        ss, tf = self.ss, c.tf
+        closed = ss.mtf.closed(tf)
+        c.sent_ts = closed[-1].ts if closed else -1
+        f = ss.mtf.forming(tf)
+        return {str(tf): [_bar(b) for b in list(closed)[-HISTORY:]]}, {str(tf): _bar(f) if f else None}
+
+    def reset_msg(self, c: Client) -> dict:
         ss = self.ss
-        hist = {str(tf): [_bar(b) for b in list(ss.mtf.closed(tf))[-HISTORY:]] for tf in ss.tfs}
-        forming = {str(tf): (_bar(f) if (f := ss.mtf.forming(tf)) else None) for tf in ss.tfs}
-        self._sent_trades = len(ss.broker.trades)
-        self._sent_tf = {tf: (ss.mtf.closed(tf)[-1].ts if ss.mtf.closed(tf) else -1) for tf in ss.tfs}
-        return {"type": "reset", "now": ss.now // S, "cursor": ss.cursor, "total": len(ss.bars),
+        hist, forming = self._history(c)
+        c.sent_trades = len(ss.broker.trades)
+        return {"type": "reset", "tf": c.tf, "now": ss.now // S, "cursor": ss.cursor, "total": len(ss.bars),
                 "state": ss.state.name.lower(), "speed": ss.speed, "history": hist, "forming": forming,
                 "positions": _positions(ss.broker), "orders": _orders(ss.broker),
                 "trades": [_trade(t) for t in ss.broker.trades], "account": self.account(),
                 "sessions": self.sessions()}
 
-    def tick_msg(self) -> dict:
-        ss = self.ss
-        closed = {}
-        for tf in ss.tfs:
-            new = []
-            for b in reversed(ss.mtf.closed(tf)):
-                if b.ts <= self._sent_tf.get(tf, -1):
-                    break
-                new.append(_bar(b))
-            if new:
-                self._sent_tf[tf] = max(x["t"] * S for x in new)
-                closed[str(tf)] = new[::-1]
-        new_trades = [_trade(t) for t in ss.broker.trades[self._sent_trades:]]
-        self._sent_trades = len(ss.broker.trades)
+    def view_msg(self, c: Client) -> dict:
+        """Sent when a client switches timeframe: just the new timeframe's bars."""
+        hist, forming = self._history(c)
+        return {"type": "view", "tf": c.tf, "history": hist, "forming": forming}
+
+    def tick_msg(self, c: Client) -> dict:
+        ss, tf = self.ss, c.tf
+        new = []
+        for b in reversed(ss.mtf.closed(tf)):
+            if b.ts <= c.sent_ts:
+                break
+            new.append(_bar(b))
+        if new:
+            c.sent_ts = max(x["t"] * S for x in new)
+        new_trades = [_trade(t) for t in ss.broker.trades[c.sent_trades:]]
+        c.sent_trades = len(ss.broker.trades)
         last = ss.bars[ss.cursor - 1] if ss.cursor else None
-        return {"type": "tick", "now": ss.now // S, "cursor": ss.cursor, "total": len(ss.bars),
-                "bar": _bar(last) if last else None, "closed": closed,
-                "forming": {str(tf): (_bar(f) if (f := ss.mtf.forming(tf)) else None) for tf in ss.tfs},
+        f = ss.mtf.forming(tf)
+        return {"type": "tick", "tf": tf, "now": ss.now // S, "cursor": ss.cursor, "total": len(ss.bars),
+                "bar": _bar(last) if last else None, "closed": {str(tf): new[::-1]} if new else {},
+                "forming": {str(tf): _bar(f) if f else None},
                 "positions": _positions(ss.broker), "orders": _orders(ss.broker), "new_trades": new_trades,
                 "account": self.account(), "sessions": self.sessions()}
 
-    async def broadcast(self, msg: dict) -> None:
+    async def _send(self, c: Client, msg: dict) -> None:
         msg = _clean(msg)
-        for ws in list(self.clients):
-            try:
-                await ws.send_json(msg)
-            except (WebSocketDisconnect, RuntimeError):      # client went away
-                self.clients.discard(ws)
-            except Exception:
-                log.exception("failed to send %s message", msg.get("type"))   # a bug, not a disconnect
+        try:
+            await c.ws.send_json(msg)
+        except (WebSocketDisconnect, RuntimeError):      # client went away
+            self.clients.pop(c.ws, None)
+        except Exception:
+            log.exception("failed to send %s message", msg.get("type"))   # a bug, not a disconnect
+
+    async def broadcast(self, msg: dict) -> None:
+        """Same message to every client (state changes, acks)."""
+        for c in list(self.clients.values()):
+            await self._send(c, msg)
+
+    async def broadcast_each(self, build) -> None:
+        """Per-client message (bar data differs by the timeframe each client views)."""
+        for c in list(self.clients.values()):
+            await self._send(c, build(c))
 
     # ---- playback
     async def _play(self) -> None:
@@ -287,7 +319,7 @@ class Runtime:
                 continue
             acc = 0.0 if n == MAX_BARS_PER_FRAME else acc - n
             ss.step(n)
-            await self.broadcast(self.tick_msg())
+            await self.broadcast_each(self.tick_msg)
         if ss.cursor >= len(ss.bars):
             ss.state = Clock.PAUSED
             await self.broadcast({"type": "end", "account": self.account()})
@@ -312,9 +344,14 @@ class Runtime:
                 pass
 
     # ---- commands
-    async def handle(self, c) -> Optional[dict]:
+    async def handle(self, c, client: Client) -> Optional[dict]:
         ss, br = self.ss, self.ss.broker
-        if isinstance(c, CmdPlay):
+        if isinstance(c, CmdView):
+            if c.tf not in ss.tfs:
+                return {"type": "error", "error": f"unknown timeframe {c.tf}; available: {list(ss.tfs)}"}
+            client.tf = c.tf
+            await self._send(client, self.view_msg(client))
+        elif isinstance(c, CmdPlay):
             self.play()
         elif isinstance(c, CmdPause):
             await self.pause()
@@ -324,7 +361,7 @@ class Runtime:
         elif isinstance(c, CmdStep):
             await self.pause()
             ss.step(c.n)
-            await self.broadcast(self.tick_msg())
+            await self.broadcast_each(self.tick_msg)
         elif isinstance(c, (CmdStepBack, CmdSeek)):
             await self.pause()
             before = ss.cursor
@@ -333,7 +370,7 @@ class Runtime:
             else:
                 ss.seek(c.ts * S)
             # forward moves are incremental (no chart redraw); backward moves rebuild the client view
-            await self.broadcast(self.tick_msg() if ss.cursor >= before else self.reset_msg())
+            await self.broadcast_each(self.tick_msg if ss.cursor >= before else self.reset_msg)
         elif isinstance(c, CmdOrder):
             if ss.cursor == 0:
                 return {"type": "error", "error": "step the replay forward before placing orders"}
@@ -341,20 +378,20 @@ class Runtime:
                       c.sl, c.tp, c.trail_ticks, c.reduce_only)
             ss.submit(o)    # via the session so the action is logged and survives step_back
             await self.broadcast({"type": "order_ack", "order_id": o.id, "status": o.status.value})
-            await self.broadcast(self.tick_msg())
+            await self.broadcast_each(self.tick_msg)
         elif isinstance(c, CmdCancel):
             ss.cancel(c.order_id)
-            await self.broadcast(self.tick_msg())
+            await self.broadcast_each(self.tick_msg)
         elif isinstance(c, CmdModify):
             if c.position_id not in br.positions:
                 return {"type": "error", "error": f"no position {c.position_id}"}
             ss.modify(c.position_id, c.sl, c.tp)
-            await self.broadcast(self.tick_msg())
+            await self.broadcast_each(self.tick_msg)
         elif isinstance(c, CmdClose):
             if c.position_id not in br.positions:
                 return {"type": "error", "error": f"no position {c.position_id}"}
             ss.close(c.position_id, c.qty)
-            await self.broadcast(self.tick_msg())
+            await self.broadcast_each(self.tick_msg)
         return None
 
 
@@ -426,7 +463,8 @@ async def delete_session(sid: str) -> dict:
 
 
 @app.websocket("/ws/{sid}")
-async def ws(websocket: WebSocket, sid: str) -> None:
+async def ws(websocket: WebSocket, sid: str, tf: int = 60) -> None:
+    """`?tf=<seconds>` selects the timeframe whose bars this client receives (change later with the `view` command)."""
     origin = websocket.headers.get("origin")
     if origin is not None and origin not in ALLOWED_ORIGINS:
         await websocket.close(code=1008)
@@ -435,10 +473,14 @@ async def ws(websocket: WebSocket, sid: str) -> None:
     if not rt:
         await websocket.close(code=4404)
         return
+    if tf not in rt.ss.tfs:
+        await websocket.close(code=4400)       # unknown timeframe
+        return
     await websocket.accept()
-    rt.clients.add(websocket)
+    client = Client(websocket, tf)
+    rt.clients[websocket] = client
     try:
-        await websocket.send_json(_clean(rt.reset_msg()))
+        await websocket.send_json(_clean(rt.reset_msg(client)))
         while True:
             raw = await websocket.receive_json()
             try:
@@ -446,12 +488,12 @@ async def ws(websocket: WebSocket, sid: str) -> None:
             except ValidationError as e:
                 await websocket.send_json({"type": "error", "error": e.errors(include_url=False)[0]["msg"]})
                 continue
-            err = await rt.handle(c)
+            err = await rt.handle(c, client)
             if err:
                 await websocket.send_json(err)
     except WebSocketDisconnect:
         pass
     finally:
-        rt.clients.discard(websocket)
+        rt.clients.pop(websocket, None)
         if not rt.clients:
             await rt.pause()   # nobody watching: don't let playback run away

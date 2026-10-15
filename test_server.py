@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -156,13 +158,97 @@ def test_manual_order_survives_step_back_over_ws(client):
 def test_default_session_has_warmup_history_on_every_timeframe(client):
     r = client.post("/sessions", json={}).json()
     assert r["start_cursor"] > 100_000                       # days of history already revealed
+    for tf in ("1", "15", "60", "300", "900", "3600", "14400"):      # every timeframe has history to show
+        with client.websocket_connect(f"/ws/{r['id']}?tf={tf}") as ws:
+            m = ws.receive_json()
+            assert list(m["history"]) == [tf] and len(m["history"][tf]) >= 15, tf   # empty HTF charts = bug
+            assert m["sessions"]["asia"]["hi"] is not None       # Asian range already known at 09:00 NY
     with client.websocket_connect(f"/ws/{r['id']}") as ws:
-        m = ws.receive_json()
-        for tf in ("1", "15", "60", "300", "900", "3600", "14400"):
-            assert len(m["history"][tf]) >= 15, tf           # no empty higher-timeframe charts
-        assert m["sessions"]["asia"]["hi"] is not None       # Asian range already known at 09:00 NY
-        ws.send_json({"cmd": "step_back", "n": 10_000})      # can't rewind into the warm-up
+        ws.receive_json()
+        ws.send_json({"cmd": "step_back", "n": 10_000})          # can't rewind into the warm-up
         assert ws.receive_json()["cursor"] == r["start_cursor"]
+
+
+def test_only_the_viewed_timeframe_is_sent(client):
+    sid = new_session(client, tfs=[1, 15, 60, 300])
+    with client.websocket_connect(f"/ws/{sid}?tf=300") as ws:
+        r = ws.receive_json()
+        assert r["tf"] == 300 and list(r["history"]) == ["300"] and list(r["forming"]) == ["300"]
+        ws.send_json({"cmd": "step", "n": 700})
+        t = ws.receive_json()
+        assert t["tf"] == 300 and list(t["forming"]) == ["300"]
+        assert list(t["closed"]) == ["300"] and len(t["closed"]["300"]) == 2   # only 5m bars, 2 closed in 700s
+
+
+def test_payload_shrinks_when_viewing_a_large_timeframe(client):
+    sid = new_session(client, tfs=[1, 15, 60, 300, 900], bars=3000)
+    sizes = {}
+    for tf in (1, 900):
+        with client.websocket_connect(f"/ws/{sid}?tf={tf}") as ws:
+            ws.receive_json()
+            ws.send_json({"cmd": "step", "n": 900})
+            sizes[tf] = len(json.dumps(ws.receive_json()))
+            ws.send_json({"cmd": "step_back", "n": 900})
+            ws.receive_json()
+    assert sizes[900] < sizes[1] / 5      # 1s view ships 900 new bars; 15m view ships 1
+
+
+def test_clients_view_different_timeframes_independently(client):
+    sid = new_session(client, tfs=[60, 300])
+    with client.websocket_connect(f"/ws/{sid}?tf=60") as a, client.websocket_connect(f"/ws/{sid}?tf=300") as b:
+        a.receive_json(); b.receive_json()
+        a.send_json({"cmd": "step", "n": 400})
+        ta, tb = a.receive_json(), b.receive_json()           # both get the broadcast tick, each for its own tf
+        assert list(ta["closed"]) == ["60"] and len(ta["closed"]["60"]) == 6
+        assert list(tb["closed"]) == ["300"] and len(tb["closed"]["300"]) == 1
+        assert ta["cursor"] == tb["cursor"] == 400
+
+
+def test_view_command_switches_timeframe_and_streams_new_one(client):
+    sid = new_session(client, tfs=[60, 300])
+    with client.websocket_connect(f"/ws/{sid}?tf=60") as ws:
+        ws.receive_json()
+        ws.send_json({"cmd": "step", "n": 650})
+        assert list(ws.receive_json()["closed"]) == ["60"]
+        ws.send_json({"cmd": "view", "tf": 300})
+        v = ws.receive_json()
+        assert v["type"] == "view" and v["tf"] == 300 and len(v["history"]["300"]) == 2 and v["forming"]["300"]
+        ws.send_json({"cmd": "step", "n": 300})
+        t = ws.receive_json()
+        assert list(t["closed"]) == ["300"] and len(t["closed"]["300"]) == 1      # no duplicates of what view sent
+        assert t["closed"]["300"][0]["t"] > v["history"]["300"][-1]["t"]
+
+
+def test_view_rejects_unknown_timeframe_and_ws_rejects_bad_query(client):
+    sid = new_session(client, tfs=[60, 300])
+    with client.websocket_connect(f"/ws/{sid}") as ws:
+        ws.receive_json()
+        ws.send_json({"cmd": "view", "tf": 7})
+        assert ws.receive_json()["type"] == "error"
+        ws.send_json({"cmd": "view", "tf": 0})
+        assert ws.receive_json()["type"] == "error"
+        ws.send_json({"cmd": "step", "n": 1})
+        assert ws.receive_json()["tf"] == 60              # still on the original timeframe
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/ws/{sid}?tf=7"):
+            pass
+
+
+def test_new_trades_are_tracked_per_client(client):
+    sid = new_session(client)
+    with client.websocket_connect(f"/ws/{sid}") as a:
+        a.receive_json()
+        a.send_json({"cmd": "step", "n": 5}); a.receive_json()
+        px = server.RUNTIMES[sid].ss.bars[4].c
+        a.send_json({"cmd": "order", "side": "long", "qty": 1, "otype": "market", "tp": px + 0.25})
+        recv_until(a, "tick")
+        a.send_json({"cmd": "step", "n": 400})
+        assert len(recv_until(a, "tick")["new_trades"]) == 1
+        with client.websocket_connect(f"/ws/{sid}") as late:      # a late joiner gets history in `reset`, not re-sent as new
+            r = late.receive_json()
+            assert len(r["trades"]) == 1
+            late.send_json({"cmd": "step", "n": 10})
+            assert late.receive_json()["new_trades"] == []
 
 
 def test_messages_are_strict_json_after_all_winning_trades(client):

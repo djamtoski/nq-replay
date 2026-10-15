@@ -219,6 +219,8 @@ function onMessage(raw: string): void {
   if (m.type === "reset") {
     if (!replayStart) replayStart = m.now;
     redrawChart();
+  } else if (m.type === "view") {
+    if (m.tf === tf) redrawChart();               // ignore a stale reply if the user has already switched again
   } else if (m.type === "tick") {
     for (const b of m.closed[String(tf)] ?? []) pushBar(b);
     const f = st.forming[String(tf)];
@@ -252,7 +254,7 @@ async function newSession(cfg: SessionCfg): Promise<string | null> {
     setConn(`server error`, "bad");
     return msg === "Failed to fetch" ? `Can't reach the API at ${API}. Is the server running?` : msg;
   }
-  const sock = new WebSocket(`${API.replace(/^http/, "ws")}/ws/${sid}`);
+  const sock = new WebSocket(`${API.replace(/^http/, "ws")}/ws/${sid}?tf=${tf}`);   // server sends only this timeframe's bars
   ws = sock;
   sock.onopen = () => { setConn("connected", "on"); syncSpeed(); };
   sock.onclose = () => { if (ws === sock) setConn("disconnected", "bad"); };
@@ -268,7 +270,10 @@ $("tfs").addEventListener("click", (e) => {
   if (!v || v === tf) return;
   tf = v; store.set("tf", v);
   document.querySelectorAll("#tfs button").forEach((b) => b.classList.toggle("active", Number((b as HTMLElement).dataset.tf) === v));
-  hover = null; redrawChart(); syncSpeed(); scheduleRender();
+  hover = null;
+  series.setData([]); times = [];                 // blank until the server's `view` reply brings this timeframe's bars
+  send({ cmd: "view", tf });
+  syncSpeed(); scheduleRender();
 });
 
 // replay dock
