@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from nq_replay import (NQ, Bar, Broker, ExecModel, MTFAggregator, Order, OType, ReplaySession,
+from nq_replay import (NQ, Bar, Broker, ClosedTrade, ExecModel, MTFAggregator, Order, OType, ReplaySession,
                        Side, active_sessions, SessionRange, stats)
 
 S = 10**9
@@ -335,11 +335,92 @@ def test_floor_snapshot_survives_pruning():
     assert min(s._snaps) == s.floor == 100 and len(s._snaps) <= 5
 
 
-def test_snapshot_cap_has_a_safe_minimum():
-    assert ReplaySession(mk_bars(10), max_snapshots=1).max_snapshots == 5
-    s = ReplaySession(mk_bars(2000), snapshot_every=10, max_snapshots=1, exec_model=ZERO, tfs=(60,))
+def test_snapshot_cap_below_the_supported_minimum_is_rejected():
+    for bad in (0, 1, 4):
+        with pytest.raises(ValueError, match="max_snapshots must be >= 5"):
+            ReplaySession(mk_bars(10), max_snapshots=bad)
+    s = ReplaySession(mk_bars(2000), snapshot_every=10, max_snapshots=5, exec_model=ZERO, tfs=(60,))
     s.step(2000)
     assert len(s._snaps) <= 5
+
+
+def test_prune_invariants_hold_over_random_step_and_rewind_sequences():
+    """Property check: whatever the sequence of plays and rewinds, the cap, earliest/newest retention and
+    determinism of the final state hold."""
+    import random
+    rnd = random.Random(11)
+    for trial in range(12):
+        cap = rnd.choice([5, 6, 8, 12])
+        every = rnd.choice([7, 25, 40])
+        s = ReplaySession(mk_bars(3000), snapshot_every=every, max_snapshots=cap, exec_model=ZERO, tfs=(60,))
+        floor = rnd.choice([0, 0, 90])
+        if floor:
+            s.preload(floor)
+        for _ in range(25):
+            if rnd.random() < 0.6 and s.cursor < 2900:
+                s.step(rnd.randint(1, 400))
+            elif s.cursor > s.floor:
+                s.step_back(rnd.randint(1, 900))
+            ks = sorted(s._snaps)
+            assert len(ks) <= cap, (trial, ks)
+            assert all(k <= s.cursor for k in ks)                          # never a snapshot from the abandoned future
+            if floor:
+                assert ks and ks[0] == floor                                # warm-up floor is never pruned
+            assert len(s.equity_curve) == s.cursor - s.floor
+        fresh = ReplaySession(mk_bars(3000), snapshot_every=10**9, max_snapshots=5, exec_model=ZERO, tfs=(60,))
+        if floor:
+            fresh.preload(floor)
+        fresh.step(s.cursor - fresh.cursor)
+        assert s.equity_curve == fresh.equity_curve and s.mtf.forming(60) == fresh.mtf.forming(60)
+
+
+def test_broker_clone_is_independent_but_shares_immutable_trades():
+    b = Broker(NQ, 100_000.0, ZERO)
+    b.submit(T0 - S, Order(Side.LONG, 1, OType.MARKET, sl=90, tp=110))
+    b.submit(T0 - S, Order(Side.LONG, 1, OType.LIMIT, price=50))
+    b.on_bar(bar(T0, 100, 100, 100, 100))
+    b.on_bar(bar(T0 + S, 100, 111, 100, 110))            # TP closes the position -> one closed trade
+    b.submit(T0, Order(Side.SHORT, 1, OType.MARKET))
+    c = b.clone()
+    assert c.trades is not b.trades and c.trades[0] is b.trades[0]       # shared immutable contents, separate list
+    c.orders[0].price = 123.0
+    c.balance += 1
+    c.trades.append(c.trades[0])
+    assert b.orders[0].price != 123.0 and b.balance != c.balance and len(b.trades) == 1
+    b.on_bar(bar(T0 + 2 * S, 100, 100, 100, 100))
+    assert len(c.positions) == 0 and len(b.positions) == 1              # original kept running; the clone did not move
+    assert (c._next_id, b._next_id) == (5, 6)            # ids 1-4 were issued before the clone; only the original issued 5
+
+
+def test_closed_trades_are_immutable_so_sharing_them_is_safe():
+    b = Broker(NQ, 100_000.0, ZERO)
+    b.submit(T0 - S, Order(Side.LONG, 1, OType.MARKET, sl=90, tp=110))
+    b.on_bar(bar(T0, 100, 100, 100, 100)); b.on_bar(bar(T0 + S, 100, 111, 100, 110))
+    with pytest.raises(Exception):
+        b.trades[0].pnl = 1e9
+
+
+def test_mtf_clone_carries_attributes_added_later():
+    a = MTFAggregator([60])
+    a.future_option = "kept"                             # stands in for an attribute a later change adds to __init__
+    assert a.clone().future_option == "kept"
+
+
+def test_rewind_fails_loudly_if_the_equity_curve_invariant_is_violated():
+    s = ReplaySession(mk_bars(500), snapshot_every=50, exec_model=ZERO, tfs=(60,))
+    s.step(300)
+    del s.equity_curve[10:]                              # corrupt: fewer points than bars stepped
+    with pytest.raises(RuntimeError, match="equity curve has"):
+        s.step_back(10)
+
+
+def test_snapshots_with_many_trades_share_trade_objects_instead_of_copying_them():
+    s = ReplaySession(mk_bars(300), snapshot_every=1000, exec_model=ZERO, tfs=(60,))
+    s.step(5)
+    t = ClosedTrade(Side.LONG, 1, 1.0, 2.0, 20.0, 1.0, 0, 1, "tp")
+    s.broker.trades.extend([t] * 5000)
+    snap_a, snap_b = s._snapshot(), s._snapshot()
+    assert snap_a[0].trades[0] is t and snap_b[0].trades[100] is t       # one object, many snapshots
 
 
 @pytest.mark.parametrize("max_snaps", [5, 8])
@@ -368,7 +449,7 @@ def test_pruned_session_rewinds_exactly_like_unpruned(max_snaps):
 
 
 def test_equity_curve_is_one_point_per_stepped_bar_after_rewinds():
-    s = ReplaySession(mk_bars(1500), snapshot_every=40, max_snapshots=4, exec_model=ZERO, tfs=(60,))
+    s = ReplaySession(mk_bars(1500), snapshot_every=40, max_snapshots=5, exec_model=ZERO, tfs=(60,))
     s.preload(50)
     s.step(900)
     s.step_back(600)
