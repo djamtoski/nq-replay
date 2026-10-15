@@ -386,4 +386,6 @@ $("sessionForm").addEventListener("submit", async (e) => {
 });
 
 window.addEventListener("beforeunload", () => ws?.close());
+// Vite hot reload re-runs this module: release the old drawing manager's window/document listeners first.
+import.meta.hot?.dispose(() => { drawings.destroy(); ws?.close(); });
 void newSession(readCfg()).then((err) => { if (err) { setConn(err, "bad"); } });

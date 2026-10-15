@@ -41,7 +41,8 @@ export class DrawingManager {
   private style: Style = { ...DEFAULT_STYLE };
   private storageKey = "";
   private editingId: string | null = null;
-  private claimed = false;                       // we own the current gesture: keep the chart from also panning
+  private readonly ac = new AbortController();
+  private claimed = false;                      // we own the current gesture: keep the chart from also panning
   private tol = HIT_TOL;                         // hit tolerance for the current pointer type
   private lastTap: { t: number; x: number; y: number } | null = null;
   private requestUpdate: (() => void) | null = null;
@@ -155,25 +156,35 @@ export class DrawingManager {
   // ------------------------------------------------------------------ pointer handling
   private bind(): void {
     const c = this.o.container;
+    const signal = this.ac.signal;      // aborting it in destroy() removes every listener below at once
     // Pointer Events cover mouse, touch and pen with one code path. touch-action:none stops the browser
     // from scrolling/zooming the page (and cancelling our pointer stream) while a finger drags on the chart.
     c.style.touchAction = "none";
-    c.addEventListener("pointerdown", (e) => this.onDown(e), { capture: true });
-    window.addEventListener("pointermove", (e) => this.onMove(e));
-    window.addEventListener("pointerup", (e) => this.onUp(e));
-    window.addEventListener("pointercancel", () => this.onCancel());
+    c.addEventListener("pointerdown", (e) => this.onDown(e), { capture: true, signal });
+    window.addEventListener("pointermove", (e) => this.onMove(e), { signal });
+    window.addEventListener("pointerup", (e) => this.onUp(e), { signal });
+    window.addEventListener("pointercancel", () => this.onCancel(), { signal });
     // The chart library has its own mouse/touch handlers that pointer events don't reach: while we own a
     // gesture, stop those events at the container so the chart doesn't pan underneath a drawing drag.
     for (const type of ["mousedown", "touchstart", "touchmove"]) {
-      c.addEventListener(type, (e) => { if (this.claimed) e.stopPropagation(); }, { capture: true });
+      c.addEventListener(type, (e) => { if (this.claimed) e.stopPropagation(); }, { capture: true, signal });
     }
-    document.addEventListener("keydown", (e) => this.onKey(e));
+    document.addEventListener("keydown", (e) => this.onKey(e), { signal });
     this.o.textInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.commitText(true);
       else if (e.key === "Escape") this.commitText(false);
       e.stopPropagation();
-    });
-    this.o.textInput.addEventListener("blur", () => this.commitText(true));
+    }, { signal });
+    this.o.textInput.addEventListener("blur", () => this.commitText(true), { signal });
+  }
+
+  /** Detach from the chart and remove every listener (hot reload, tests, or replacing the chart). */
+  destroy(): void {
+    this.ac.abort();
+    this.o.series.detachPrimitive(this.primitive);
+    this.requestUpdate = null;
+    this.o.container.style.touchAction = "";
+    this.o.container.style.cursor = "";
   }
 
   /** Take ownership of this gesture (keeps the chart's own handlers out of it). */
@@ -278,7 +289,12 @@ export class DrawingManager {
     if (!e.isPrimary) return;
     this.release();
     if (this.drag) {
-      if (this.drag.moved) this.save();
+      if (this.drag.moved) {
+        // a finger can lift somewhere new without a final pointermove: honour the release position too
+        const m = this.mouse(e);
+        if (m) this.dragTo(m);
+        this.save();
+      }
       this.drag = null; return;
     }
     if (this.brushing) {
@@ -406,7 +422,7 @@ export class DrawingManager {
       if (b.dataset.tool) this.setTool(b.dataset.tool as ToolId);
       else if (b.dataset.act === "eye") { this.visible = !this.visible; this.syncUi(); this.redraw(); }
       else if (b.dataset.act === "trash") this.clearAll();
-    });
+    }, { signal: this.ac.signal });
   }
   private syncUi(): void {
     this.o.toolbar.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.classList.toggle("active", b.dataset.tool === this.tool));
