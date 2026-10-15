@@ -23,6 +23,15 @@ python nq_data.py ingest --start 2025-03-03 --end 2025-03-07
 ```
 Then choose "Parquet" in the UI.
 
+**First live run (cheap and safe):** the Databento path is tested offline against genuine DBN data (see
+`test_nq_data_databento.py`) but has never called the live API. Start small:
+1. `python nq_data.py cost --start 2025-03-10 --end 2025-03-10` (one day) and check the price;
+2. `python nq_data.py ingest --start 2025-03-10 --end 2025-03-10`, then `python nq_data.py info`;
+3. choose "Real data", start/end date 2025-03-10 (the app loads 3 earlier trading days as chart history, so
+   ingest those too, or set the start a few days after your first downloaded day).
+If Databento rejects a request (bad key, dates it does not have yet) you get a one-line message; days already
+downloaded are kept and the next run resumes after them. The key is read only from `DATABENTO_API_KEY`.
+
 ## Tests
 ```bash
 python -m pytest -q          # engine, data, server

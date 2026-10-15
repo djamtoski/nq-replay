@@ -3,7 +3,7 @@ nq_data.py - Databento ohlcv-1s -> daily Parquet, plus a loader that feeds Repla
 
 Layout (one file per CME *trading day*, 18:00 NY prior evening -> 17:00 NY):
     <root>/<SYMBOL>/1s/<YYYY>/<YYYY-MM-DD>.parquet
-    columns: ts int64 (bar open, epoch ns UTC) | o,h,l,c float64 | v int64 | instrument_id int32
+    columns: ts int64 (bar open, epoch ns UTC) | o,h,l,c float64 | v int64 | instrument_id uint32
 
 CLI (reads DATABENTO_API_KEY from the environment; the key is never logged or stored):
     python nq_data.py cost   --start 2025-03-03 --end 2025-03-08
@@ -34,7 +34,7 @@ DATASET = "GLBX.MDP3"
 DEFAULT_ROOT = Path(__file__).parent / "data" / "bars"
 SCHEMA = pa.schema([
     ("ts", pa.int64()), ("o", pa.float64()), ("h", pa.float64()), ("l", pa.float64()),
-    ("c", pa.float64()), ("v", pa.int64()), ("instrument_id", pa.int32()),
+    ("c", pa.float64()), ("v", pa.int64()), ("instrument_id", pa.uint32()),   # Databento ids are uint32 (can exceed 2**31)
 ])
 
 
@@ -82,7 +82,7 @@ def frame_to_table(df) -> pa.Table:
         "l": pa.array(df["low"].to_numpy(), pa.float64()),
         "c": pa.array(df["close"].to_numpy(), pa.float64()),
         "v": pa.array(df["volume"].to_numpy(), pa.int64()),
-        "instrument_id": pa.array(df["instrument_id"].to_numpy(), pa.int32()),
+        "instrument_id": pa.array(df["instrument_id"].to_numpy(), pa.uint32()),
     }, schema=SCHEMA)
     return t.sort_by("ts")
 
@@ -185,13 +185,19 @@ def main(argv=None) -> None:
         return info(a.root)
     if not (a.start and a.end):
         ap.error("--start and --end are required")
-    usd = cost(a.symbol, a.start, a.end)
-    print(f"Estimated Databento cost: ${usd:,.2f} for {a.symbol} {a.start}..{a.end}")
-    if a.cmd == "cost":
-        return
-    if not a.yes and input("Proceed? [y/N] ").strip().lower() != "y":
-        return print("aborted")
-    print(f"done: {ingest(a.symbol, a.start, a.end, a.root, a.force)} day(s) written")
+    import databento as db       # lazy: the loader/engine must stay importable without the API client
+    try:
+        usd = cost(a.symbol, a.start, a.end)
+        print(f"Estimated Databento cost: ${usd:,.2f} for {a.symbol} {a.start}..{a.end}")
+        if a.cmd == "cost":
+            return
+        if not a.yes and input("Proceed? [y/N] ").strip().lower() != "y":
+            return print("aborted")
+        print(f"done: {ingest(a.symbol, a.start, a.end, a.root, a.force)} day(s) written")
+    except db.BentoError as e:
+        # bad key / quota / dates the service doesn't have yet: a clear message, not a traceback.
+        # Days already written stay on disk and the next run resumes after them.
+        sys.exit(f"Databento rejected the request: {e}\nDays already downloaded are kept; re-run to resume.")
 
 
 if __name__ == "__main__":
