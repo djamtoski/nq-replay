@@ -58,6 +58,22 @@ input:disabled { opacity: .5; }
 .dock select { padding: 4px 6px; }
 .dock .muted { font-size: 12px; min-width: 120px; text-align: right; }
 
+/* drawing tools */
+.drawbar { position: absolute; z-index: 5; left: 8px; top: 40px; display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  max-height: calc(100% - 120px); overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,.3); }
+.drawbar button { width: 32px; height: 32px; padding: 0; display: grid; place-items: center; border: 0; background: transparent; color: var(--muted); border-radius: 4px; }
+.drawbar button:hover { background: var(--hover); color: var(--text); }
+.drawbar button.active { background: var(--accent); color: #fff; }
+.hsep { height: 1px; margin: 3px 4px; background: var(--line); }
+.propbar { position: absolute; z-index: 5; top: 8px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,.3); }
+.propbar[hidden], .textinput[hidden] { display: none; }
+.propbar .sw { width: 18px; height: 18px; padding: 0; border-radius: 50%; border: 2px solid transparent; }
+.propbar .sw.on { border-color: var(--text); }
+.propbar button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.propbar select { padding: 2px 4px; }
+.textinput { position: absolute; z-index: 6; min-width: 180px; padding: 4px 8px; }
+
 /* bottom drawer */
 .drawer { height: 200px; border-top: 1px solid var(--line); display: flex; flex-direction: column; flex: none; background: var(--bg); }
 .tabs { display: flex; gap: 2px; padding: 4px 8px; border-bottom: 1px solid var(--line); align-items: center; }
@@ -96,7 +112,14 @@ dialog h2 { margin: 0 0 12px; font-size: 16px; }
 .dlgbtns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 
 @media (max-width: 900px) {
-  .body { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
-  #side { border-left: 0; border-top: 1px solid var(--line); max-height: 40vh; }
+  /* narrow window: stack panels under a chart that keeps a usable height, and let the page scroll */
+  body { overflow: auto; }
+  #app { height: auto; min-height: 100vh; }
+  .body { display: flex; flex-direction: column; }
+  .chartcol { flex: none; }
+  .chartarea { flex: none; height: max(360px, 62vh); }
+  #side { border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
   .brand, .sym { display: none; }
+  header { flex-wrap: wrap; height: auto; padding: 6px 12px; }
 }
+@media (max-height: 560px) and (min-width: 901px) { .drawer { height: 120px; } }

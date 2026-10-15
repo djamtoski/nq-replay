@@ -1,6 +1,7 @@
 import { CandlestickSeries, ColorType, createChart, CrosshairMode, LineStyle, type CandlestickData, type IPriceLine, type UTCTimestamp } from "lightweight-charts";
 import { apply, bracket, fmt, initial, nextCandleEnd, prevCandleEnd, type Bar, type ServerMsg, type State } from "./store";
 import { CPS, cpsLabel, effectiveCps, feasible, replayRate } from "./speed";
+import { DrawingManager } from "./drawings/manager";
 
 const API = (import.meta.env.VITE_API as string | undefined) ?? "http://127.0.0.1:8000";
 const TFS: [number, string][] = [[1, "1s"], [15, "15s"], [60, "1m"], [300, "5m"], [900, "15m"], [3600, "1h"], [14400, "4h"]];
@@ -21,6 +22,7 @@ let pointValue = 20;
 let orderType: "market" | "limit" | "stop" = "market";
 let hover: CandlestickData | null = null;
 let replayStart = 0;     // replay time (epoch s) of the first reset: the "now" the session began at
+let times: number[] = [];   // bar times currently in the series, in order (drawings map time <-> bar index with this)
 
 // ================================================================ chart
 const css = (v: string) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -73,9 +75,22 @@ function redrawChart(): void {
   const f = st.forming[tf];
   if (f) data.push(toC(f));
   series.setData(data);
+  times = data.map((d) => d.time as number);
   const n = data.length;
   chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 130), to: n + 10 });
 }
+
+/** Update the series and keep `times` mirroring it exactly (same-time update replaces, later time appends). */
+function pushBar(b: Bar): void {
+  series.update(toC(b));
+  if (times[times.length - 1] !== b.t) times.push(b.t);
+}
+
+const drawings = new DrawingManager({
+  chart, series, container: $("chart"), toolbar: $("drawbar"), propbar: $("propbar"), textInput: $<HTMLInputElement>("textInput"),
+  getTimes: () => times, getInterval: () => tf, getPointValue: () => pointValue, fmtPrice: (p) => fmt(p),
+  notify: (m) => { st.lastError = m; scheduleRender(); },
+});
 
 chart.subscribeCrosshairMove((p) => {
   hover = (p.time ? (p.seriesData.get(series) as CandlestickData | undefined) : undefined) ?? null;
@@ -205,9 +220,9 @@ function onMessage(raw: string): void {
     if (!replayStart) replayStart = m.now;
     redrawChart();
   } else if (m.type === "tick") {
-    for (const b of m.closed[String(tf)] ?? []) series.update(toC(b));
+    for (const b of m.closed[String(tf)] ?? []) pushBar(b);
     const f = st.forming[String(tf)];
-    if (f) series.update(toC(f));
+    if (f) pushBar(f);
   }
   scheduleRender();
 }
@@ -216,8 +231,9 @@ interface SessionCfg { source: string; instrument: string; startTime: string; ba
 
 async function newSession(cfg: SessionCfg): Promise<string | null> {
   ws?.close(); ws = null;
-  clearLines(); st = initial(); replayStart = 0; series.setData([]); hover = null; renderLegend(); scheduleRender();
+  clearLines(); st = initial(); replayStart = 0; series.setData([]); times = []; hover = null; renderLegend(); scheduleRender();
   pointValue = cfg.instrument === "MNQ" ? 2 : 20;
+  drawings.load(`drawings:v1:${cfg.source}:${cfg.instrument}`);
   $("symbol").textContent = `${cfg.instrument} · CME`;
   setConn("creating session…");
   const body: Record<string, unknown> = { source: cfg.source, instrument: cfg.instrument, start_time: cfg.startTime,

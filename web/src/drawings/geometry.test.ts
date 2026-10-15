@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { channelOffsetY, distToSegment, fibPrice, fmtDuration, handlePoints, hitTest, inBox, logicalToTime, measure, positionLevels, rayEnd, timeToLogical } from "./geometry";
+import { channelOffsetY, distToSegment, fibPrice, fmtDuration, handlePoints, hitTest, inBox, logicalToTime, measure, positionLevels, rayEnd, sanitizeDrawings, timeToLogical } from "./geometry";
 import type { Drawing } from "./types";
 
 const times = [100, 160, 220, 280];   // 60s bars
@@ -52,6 +52,41 @@ describe("2D helpers", () => {
     expect(channelOffsetY({ x: 0, y: 0 }, { x: 0, y: 10 }, { x: 4, y: 7 })).toBe(7);
   });
   it("box test", () => { expect(inBox({ x: 5, y: 5 }, { x: 10, y: 0 }, { x: 0, y: 10 })).toBe(true); expect(inBox({ x: 11, y: 5 }, { x: 0, y: 0 }, { x: 10, y: 10 })).toBe(false); });
+});
+
+describe("sanitizeDrawings (untrusted localStorage data)", () => {
+  const good = { id: "a", type: "trend", pts: [{ t: 1, p: 2 }, { t: 3, p: 4 }], style: { color: "#fff", width: 2, dash: false } };
+  it("keeps valid drawings and fills in missing style/id", () => {
+    const r = sanitizeDrawings([good, { type: "hline", pts: [{ t: 1, p: 5 }] }]);
+    expect(r).toHaveLength(2);
+    expect(r[1].style).toEqual({ color: "#2962ff", width: 2, dash: false });
+    expect(r[1].id).toMatch(/^[a-z0-9]{1,8}$/);
+  });
+  it("drops anything that would crash the renderer", () => {
+    const bad = [null, 5, "x", [], {}, { type: "nope", pts: [] }, { type: "trend" }, { type: "trend", pts: null },
+      { type: "trend", pts: [{ t: 1, p: 2 }] }, { type: "trend", pts: [{ t: 1, p: 2 }, null] },
+      { type: "trend", pts: [{ t: "1", p: 2 }, { t: 3, p: 4 }] }, { type: "trend", pts: [{ t: NaN, p: 2 }, { t: 3, p: 4 }] },
+      { type: "channel", pts: [{ t: 1, p: 1 }, { t: 2, p: 2 }] }, { type: "brush", pts: [{ t: 1, p: 1 }] },
+      { type: "toString", pts: [] }, { type: "__proto__", pts: [] }];
+    expect(sanitizeDrawings(bad)).toEqual([]);
+    expect(sanitizeDrawings("garbage")).toEqual([]);
+    expect(sanitizeDrawings(undefined)).toEqual([]);
+  });
+  it("clamps style values and keeps optional fields only when valid", () => {
+    const [d] = sanitizeDrawings([{ ...good, style: { color: 5, width: 999, dash: "yes" }, text: 3, stop: "x" }]);
+    expect(d.style).toEqual({ color: "#2962ff", width: 8, dash: false });
+    expect("text" in d).toBe(false);
+    expect("stop" in d).toBe(false);
+    const [e] = sanitizeDrawings([{ ...good, type: "long", text: "hi", stop: 7 }]);
+    expect(e.stop).toBe(7);
+    expect(e.text).toBe("hi");
+  });
+  it("does not alias or mutate its input", () => {
+    const src = [JSON.parse(JSON.stringify(good))];
+    const [d] = sanitizeDrawings(src);
+    d.pts[0].t = 999;
+    expect(src[0].pts[0].t).toBe(1);
+  });
 });
 
 describe("trading maths", () => {
