@@ -23,6 +23,7 @@ interface Drag { kind: "handle" | "move"; id: string; index: number; startLogica
 const HIT_TOL = 6;           // px: mouse / pen
 const TOUCH_TOL = 14;        // px: a fingertip is far less precise than a cursor
 const DOUBLE_TAP_MS = 400;
+const GESTURE_STALE_MS = 2000;   // a pointer silent this long while "down" has lost its pointerup
 const MAX_UNDO = 60;
 const BRUSH_MIN_PX = 3;      // decimation: ignore moves smaller than this
 const BRUSH_MAX_POINTS = 1500;
@@ -44,7 +45,9 @@ export class DrawingManager {
   private readonly ac = new AbortController();
   private claimed = false;                      // we own the current gesture: keep the chart from also panning
   private tol = HIT_TOL;                         // hit tolerance for the current pointer type
-  private lastTap: { t: number; x: number; y: number } | null = null;
+  private lastTap: { id: string; t: number; x: number; y: number } | null = null;
+  private gesture: { id: number; t: number } | null = null;   // the pointer that owns the current press-drag-release
+  private releaseTimer = 0;
   private requestUpdate: (() => void) | null = null;
   private readonly primitive: ISeriesPrimitive<Time>;
   private readonly view: IPrimitivePaneView;
@@ -159,11 +162,22 @@ export class DrawingManager {
     const signal = this.ac.signal;      // aborting it in destroy() removes every listener below at once
     // Pointer Events cover mouse, touch and pen with one code path. touch-action:none stops the browser
     // from scrolling/zooming the page (and cancelling our pointer stream) while a finger drags on the chart.
+    // (Trade-off: this also stops the browser scrolling/zooming the page by dragging on the chart; the chart
+    // library supplies its own pan/pinch. On a phone-width layout scroll the page from the panels below.)
     c.style.touchAction = "none";
+    // A long press must not open the context menu / selection callout: Chrome answers it with pointercancel,
+    // which would abandon a slow, deliberate drag.
+    c.style.userSelect = "none";
+    c.style.setProperty("-webkit-user-select", "none");
+    c.style.setProperty("-webkit-touch-callout", "none");
+    c.addEventListener("contextmenu", (e) => { if (this.gesture || this.claimed) e.preventDefault(); }, { signal });
     c.addEventListener("pointerdown", (e) => this.onDown(e), { capture: true, signal });
     window.addEventListener("pointermove", (e) => this.onMove(e), { signal });
     window.addEventListener("pointerup", (e) => this.onUp(e), { signal });
-    window.addEventListener("pointercancel", () => this.onCancel(), { signal });
+    // Only OUR pointer's cancellation abandons the gesture (not a scroll elsewhere on the page); losing the
+    // window mid-gesture (alt-tab, system dialog) loses the pointerup, so abandon it then too.
+    window.addEventListener("pointercancel", (e) => { if (this.gesture && e.pointerId === this.gesture.id) this.abort(); }, { signal });
+    window.addEventListener("blur", () => { if (this.gesture) this.abort(); }, { signal });
     // The chart library has its own mouse/touch handlers that pointer events don't reach: while we own a
     // gesture, stop those events at the container so the chart doesn't pan underneath a drawing drag.
     for (const type of ["mousedown", "touchstart", "touchmove"]) {
@@ -181,38 +195,62 @@ export class DrawingManager {
   /** Detach from the chart and remove every listener (hot reload, tests, or replacing the chart). */
   destroy(): void {
     this.ac.abort();
+    window.clearTimeout(this.releaseTimer);
     this.o.series.detachPrimitive(this.primitive);
     this.requestUpdate = null;
-    this.o.container.style.touchAction = "";
-    this.o.container.style.cursor = "";
+    const s = this.o.container.style;
+    s.touchAction = ""; s.cursor = ""; s.userSelect = "";
+    s.removeProperty("-webkit-user-select"); s.removeProperty("-webkit-touch-callout");
   }
 
-  /** Take ownership of this gesture (keeps the chart's own handlers out of it). */
-  private claim(e: Event): void { this.claimed = true; e.stopPropagation(); e.preventDefault(); }
-  /** Release shortly after pointerup so the touch/mouse compat events that follow are still swallowed. */
-  private release(): void { setTimeout(() => { this.claimed = false; }, 60); }
+  /**
+   * Take ownership of this gesture and remember which pointer it belongs to, so a palm (touch) resting while a
+   * pen draws, or a cancel from an unrelated scroll, cannot hijack or abort it.
+   * preventDefault on pointerdown already suppresses the compat *mouse* events; the chart's *touch* handlers
+   * (touchstart/touchmove/touchend) still fire around the gesture, which is what `claimed` blocks.
+   */
+  private claim(e: PointerEvent): void {
+    window.clearTimeout(this.releaseTimer);           // a pending release from the previous gesture must not clear this claim
+    this.claimed = true;
+    this.gesture = { id: e.pointerId, t: e.timeStamp };
+    e.stopPropagation(); e.preventDefault();
+  }
+  /** End the gesture; the claim lingers briefly so the touchend that follows pointerup is still swallowed. */
+  private release(): void {
+    this.gesture = null;
+    window.clearTimeout(this.releaseTimer);
+    this.releaseTimer = window.setTimeout(() => { this.claimed = false; }, 60);
+  }
+  /** Is this event from the pointer that owns the current gesture (or is there no gesture)? */
+  private own(e: PointerEvent): boolean { return !this.gesture || e.pointerId === this.gesture.id; }
 
   private onDown(e: PointerEvent): void {
     if (!e.isPrimary || (e.pointerType === "mouse" && e.button !== 0) || e.target === this.o.textInput) return;
+    if (this.gesture) {
+      // Another pointer pressing while ours is active is ignored, unless ours went quiet (its pointerup was lost).
+      const stale = e.timeStamp - this.gesture.t > GESTURE_STALE_MS;
+      if (!stale && e.pointerId !== this.gesture.id) return;
+      this.abort();
+    }
     this.tol = e.pointerType === "touch" ? TOUCH_TOL : HIT_TOL;
     // preventDefault below would stop the text box from blurring, so commit an open editor explicitly
     if (!this.o.textInput.hidden) this.commitText(true);
     const m = this.mouse(e);
     if (!m) return;                                   // axis area: let the chart handle it
+    const prev = this.lastTap;
+    this.lastTap = null;                              // any press resets the double-press timer; a text hit below re-arms it
     if (this.tool !== "cursor") { this.claim(e); this.toolDown(m); return; }
     const hit = this.hitAt(m.xy);
     if (!hit) { if (this.selectedId) this.select(null); return; }        // empty space: let the chart pan
     this.claim(e);
-    // second press on a text label within DOUBLE_TAP_MS edits it (works for mouse and touch alike)
+    // second press on the SAME text label within DOUBLE_TAP_MS edits it (works for mouse and touch alike)
     if (hit.d.type === "text") {
-      const prev = this.lastTap;
-      if (prev && e.timeStamp - prev.t < DOUBLE_TAP_MS && Math.hypot(prev.x - m.xy.x, prev.y - m.xy.y) < 20) {
-        this.lastTap = null;
+      if (prev && prev.id === hit.d.id && e.timeStamp - prev.t < DOUBLE_TAP_MS && Math.hypot(prev.x - m.xy.x, prev.y - m.xy.y) < 20) {
         this.select(hit.d.id);
         this.openText(hit.d.id, hit.d.text ?? "");
         return;
       }
-      this.lastTap = { t: e.timeStamp, x: m.xy.x, y: m.xy.y };
+      this.lastTap = { id: hit.d.id, t: e.timeStamp, x: m.xy.x, y: m.xy.y };
     }
     this.select(hit.d.id);
     this.drag = { kind: hit.kind === "body" ? "move" : "handle", id: hit.d.id, index: hit.index, startLogical: m.logical, startPrice: m.pt.p, orig: JSON.parse(JSON.stringify(hit.d)) as Drawing, moved: false };
@@ -233,7 +271,8 @@ export class DrawingManager {
   private hoverQueued = false;
 
   private onMove(e: PointerEvent): void {
-    if (!e.isPrimary) return;
+    if (!e.isPrimary || !this.own(e)) return;
+    if (this.gesture) this.gesture.t = e.timeStamp;       // proof the pointer is still alive (see onDown's stale check)
     const active = this.drag || this.draft || this.brushing;
     // idle hover (mouse/pen only; a finger has no hover): only over the chart, at most once per frame
     if (!active) {
@@ -269,8 +308,8 @@ export class DrawingManager {
     if (this.draft) { this.hoverPt = m?.pt ?? this.hoverPt; this.redraw(); }
   }
 
-  /** The browser took the pointer away (e.g. system gesture, palm rejection): abandon the gesture cleanly. */
-  private onCancel(): void {
+  /** The gesture can't complete (browser cancelled the pointer, window lost focus, pointerup lost): abandon it cleanly. */
+  private abort(): void {
     if (this.drag) {
       const dr = this.drag;
       if (dr.moved) {
@@ -286,7 +325,7 @@ export class DrawingManager {
   }
 
   private onUp(e: PointerEvent): void {
-    if (!e.isPrimary) return;
+    if (!e.isPrimary || !this.own(e)) return;
     this.release();
     if (this.drag) {
       if (this.drag.moved) {

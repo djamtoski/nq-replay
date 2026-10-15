@@ -48,9 +48,9 @@ function rig(nBars = 100): Rig {
 }
 
 // ---------------------------------------------------------------- input helpers
-function pe(kind: string, x: number, y: number, o: { type?: string; primary?: boolean; button?: number; ts?: number } = {}): MouseEvent {
+function pe(kind: string, x: number, y: number, o: { type?: string; primary?: boolean; button?: number; ts?: number; id?: number } = {}): MouseEvent {
   const ev = new MouseEvent(kind, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: o.button ?? 0 });
-  Object.defineProperties(ev, { pointerType: { value: o.type ?? "mouse" }, isPrimary: { value: o.primary ?? true }, pointerId: { value: 1 } });
+  Object.defineProperties(ev, { pointerType: { value: o.type ?? "mouse" }, isPrimary: { value: o.primary ?? true }, pointerId: { value: o.id ?? 1 } });
   if (o.ts !== undefined) Object.defineProperty(ev, "timeStamp", { value: o.ts });
   return ev;
 }
@@ -270,7 +270,7 @@ describe("selecting and editing", () => {
     trend(); deselect(); tool("hline"); click(500, 300); deselect();
     const before = JSON.stringify(saved()[0].pts);
     down(150, 125); move(190, 160);
-    window.dispatchEvent(new Event("pointercancel"));
+    window.dispatchEvent(pe("pointercancel", 190, 160));          // the pointer that owns the drag
     expect(JSON.stringify(saved()[0].pts)).toBe(before);
     undo();                                              // must undo the hline creation, not a ghost of the drag
     expect(saved().map((d) => d.type)).toEqual(["trend"]);
@@ -347,6 +347,101 @@ describe("pointer types", () => {
   });
 });
 
+// ---------------------------------------------------------------- gesture ownership (review fixes)
+describe("gesture ownership", () => {
+  const cancel = (id: number) => window.dispatchEvent(pe("pointercancel", 0, 0, { id }));
+
+  it("a palm (another pointer type) pressing while the pen draws is ignored", () => {
+    tool("trend");
+    down(100, 100, { type: "pen", id: 1 });
+    down(400, 400, { type: "touch", id: 7 });             // palm: primary for its own type, but not our pointer
+    move(450, 450, { type: "touch", id: 7 });
+    up(450, 450, { type: "touch", id: 7 });               // its release must not end the pen's gesture either
+    up(100, 100, { type: "pen", id: 1 });
+    expect(saved()).toHaveLength(0);                      // still drafting from the pen's first point
+    click(200, 150, { type: "pen", id: 1 });
+    expect(saved()[0].pts).toEqual([{ t: T(10), p: 20050 }, { t: T(20), p: 20025 }]);
+  });
+
+  it("pointercancel from another pointer is ignored; the owner's cancel aborts", () => {
+    tool("trend"); click(100, 100); click(200, 150); click(700, 20);
+    const before = JSON.stringify(saved()[0].pts);
+    down(150, 125); move(190, 160);
+    cancel(99);                                           // e.g. a scroll gesture elsewhere on the page
+    move(200, 170); up(200, 170);
+    expect(JSON.stringify(saved()[0].pts)).not.toBe(before);   // the drag carried on and was saved
+    undo();
+    down(150, 125); move(190, 160);
+    cancel(1);                                            // the owner
+    expect(JSON.stringify(saved()[0].pts)).toBe(before);
+  });
+
+  it("a pointercancel with no gesture running does not discard a half-drawn shape", () => {
+    tool("trend"); click(100, 100);                       // draft with one point, between clicks
+    cancel(1);
+    click(200, 150);
+    expect(saved()[0].pts).toHaveLength(2);
+  });
+
+  it("a quick second press keeps its claim: the previous release timer is cancelled", async () => {
+    const seen: string[] = [];
+    r.canvas.addEventListener("mousedown", () => seen.push("mouse"));
+    tool("trend");
+    click(100, 100);                                      // release timer (60 ms) starts here
+    await vi.advanceTimersByTimeAsync(50);
+    down(200, 150);                                       // second press 50 ms later claims again
+    await vi.advanceTimersByTimeAsync(30);                // the FIRST timer would have fired by now (at 60 ms)
+    r.canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    expect(seen).toEqual([]);                             // still blocked from the chart
+    up(200, 150); await settle();
+    r.canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    expect(seen).toEqual(["mouse"]);                      // and released properly afterwards
+  });
+
+  it("window blur abandons a drag in progress (the pointerup is lost) and input works again after", () => {
+    tool("trend"); click(100, 100); click(200, 150); click(700, 20);
+    const before = JSON.stringify(saved()[0].pts);
+    down(150, 125); move(190, 160);
+    window.dispatchEvent(new Event("blur"));
+    up(220, 190);                                         // the pointerup that finally arrives must not finish the dead drag
+    expect(JSON.stringify(saved()[0].pts)).toBe(before);
+    click(700, 20);                                       // a normal press/release works
+    expect(selected()).toBe(false);
+  });
+
+  it("a pointer that has gone silent for 2 s is treated as lost and no longer blocks others", () => {
+    tool("trend");
+    down(100, 100, { type: "pen", id: 1, ts: 0 });        // pen goes down, then its pointerup is lost
+    down(300, 300, { type: "touch", id: 5, ts: 100 });    // 100 ms later: pen is alive, touch ignored
+    up(300, 300, { type: "touch", id: 5, ts: 120 });
+    down(300, 300, { type: "touch", id: 5, ts: 2500 });   // 2.5 s later: pen is presumed gone, touch takes over
+    up(300, 300, { type: "touch", id: 5, ts: 2520 });
+    click(400, 200, { type: "touch", id: 5, ts: 2600 });
+    expect(saved()[0].pts[0]).toEqual({ t: T(30), p: 19950 });   // started from the touch point, not the lost pen's
+  });
+
+  it("long-press context menus are blocked only while we own a gesture", () => {
+    expect(r.container.style.userSelect).toBe("none");
+    const menu = () => { const e = new Event("contextmenu", { bubbles: true, cancelable: true }); r.container.dispatchEvent(e); return e.defaultPrevented; };
+    expect(menu()).toBe(false);                           // idle: the normal right-click menu is untouched
+    tool("hline"); down(100, 100);
+    expect(menu()).toBe(true);
+    up(100, 100); vi.advanceTimersByTime(80);
+    expect(menu()).toBe(false);
+  });
+
+  it("destroy restores the container's styles and stops blocking the chart even mid-gesture", () => {
+    tool("hline"); down(100, 100);
+    r.m.destroy();
+    const s = r.container.style;
+    expect([s.touchAction, s.userSelect, s.cursor]).toEqual(["", "", ""]);
+    const seen: string[] = [];
+    r.canvas.addEventListener("mousedown", () => seen.push("mouse"));
+    r.canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    expect(seen).toEqual(["mouse"]);                      // nothing is blocking the chart any more
+  });
+});
+
 // ---------------------------------------------------------------- text
 describe("text tool", () => {
   const typeText = (v: string) => { r.textInput.value = v; };
@@ -387,6 +482,24 @@ describe("text tool", () => {
     down(105, 100, { ts: 5200 }); up(105, 100);          // 200 ms later
     expect(r.textInput.hidden).toBe(false);
     expect(r.textInput.value).toBe("Support");
+  });
+  it("an intervening press resets the double-press timer", () => {
+    makeText(); click(700, 20);
+    down(105, 100, { ts: 1000 }); up(105, 100);
+    down(700, 20, { ts: 1100 }); up(700, 20);             // pressing elsewhere in between
+    down(105, 100, { ts: 1300 }); up(105, 100);           // 300 ms after the first press, but not consecutive
+    expect(r.textInput.hidden).toBe(true);
+  });
+  it("a double press needs the same label: two different labels close together do not open an editor", () => {
+    makeText("AAAAAAAAAA");                                // wide label at x 100 (hit area ~98..178)
+    tool("text"); click(170, 100); typeText("B"); enter();  // second label starting at x 170
+    click(700, 20);
+    down(150, 100, { ts: 1000 }); up(150, 100);           // label A (only A reaches x=150)
+    down(169, 100, { ts: 1100 }); up(169, 100);           // label B: 100 ms later and only 19 px away, but a different label
+    expect(r.textInput.hidden).toBe(true);
+    down(169, 100, { ts: 1200 }); up(169, 100);           // B again: now a genuine double press on B
+    expect(r.textInput.hidden).toBe(false);
+    expect(r.textInput.value).toBe("B");
   });
   it("editing existing text is undoable", () => {
     makeText("Support"); click(700, 20);
