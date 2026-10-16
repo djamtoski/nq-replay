@@ -582,3 +582,48 @@ def test_ids_are_stable_across_replay():
     s.close(pid, 1)  # id from before the replay still valid
     s.step(2)
     assert s.broker.positions[pid].qty == 1
+
+
+# ---------------- MAE / MFE (journal) ----------------
+def test_excursions_are_tracked_from_the_bar_after_entry_and_include_the_exit_bar():
+    b = broker()
+    b.submit(T0 - S, Order(Side.LONG, 1, OType.MARKET, tp=105))
+    b.on_bar(
+        bar(T0, 100, 110, 90, 100)
+    )  # entry bar: its range happened before/at the fill, not counted
+    p = next(iter(b.positions.values()))
+    assert (p.mae, p.mfe) == (0.0, 0.0)
+    b.on_bar(bar(T0 + S, 100, 103, 99, 102))
+    assert (p.mae, p.mfe) == (1.0, 3.0)
+    b.on_bar(bar(T0 + 2 * S, 102, 106, 100, 105))  # take profit hit on this bar
+    t = b.trades[-1]
+    assert (t.reason, t.mae, t.mfe) == ("tp", 1.0, 6.0)
+
+
+def test_short_excursions_are_mirrored():
+    b = broker()
+    b.submit(T0 - S, Order(Side.SHORT, 1, OType.MARKET))
+    b.on_bar(bar(T0, 100, 100, 100, 100))
+    p = next(iter(b.positions.values()))
+    b.on_bar(bar(T0 + S, 100, 101, 96, 97))
+    assert (p.mae, p.mfe) == (1.0, 4.0)
+
+
+def test_excursions_survive_partial_close_and_snapshots():
+    s = ReplaySession(
+        [bar(T0 + i * S, 100, 100 + i % 5, 99, 100) for i in range(300)],
+        NQ,
+        exec_model=ZERO,
+        snapshot_every=50,
+    )
+    s.step(10)
+    s.submit(Order(Side.LONG, 2, OType.MARKET))
+    s.step(20)
+    pid = next(iter(s.broker.positions))
+    s.close(pid, 1)
+    s.step(2)  # the close is a market order: it fills on the next bar
+    t = s.broker.trades[-1]
+    assert t.qty == 1 and t.mfe == 4.0 and t.mae == 1.0
+    s.step_back(5)  # restored positions keep their excursions
+    s.step(5)
+    assert next(iter(s.broker.positions.values())).mfe == 4.0

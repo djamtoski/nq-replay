@@ -21,6 +21,7 @@
         ></select>
         <span id="conn" class="pill">connecting…</span>
         <button id="newSession" title="Start a new session">New session…</button>
+        <button id="journalBtn" title="Trade journal: notes, analytics, calendar">Journal</button>
         <button id="togglePanels" title="Hide/show side panel and positions (chart focus)">
           Focus
         </button>
@@ -181,10 +182,7 @@
           <label class="real">Start date <input id="start" type="date" /></label>
           <label class="real">End date <input id="end" type="date" /></label>
         </div>
-        <p class="muted small">
-          Synthetic: 3 trading days of generated 1-second bars; the replay starts on the last day
-          with earlier days shown as chart history.
-        </p>
+        <p id="dlgHint" class="muted small"></p>
         <p id="dlgErr" class="err"></p>
         <div class="dlgbtns">
           <button value="cancel" type="button" id="dlgCancel">Cancel</button>
@@ -192,6 +190,7 @@
         </div>
       </form>
     </dialog>
+    <dialog id="journalDlg" aria-label="Trade journal"></dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

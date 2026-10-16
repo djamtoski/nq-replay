@@ -22,6 +22,10 @@ import {
 } from "./store";
 import { CPS, cpsLabel, effectiveCps, feasible, replayRate } from "./speed";
 import { DrawingManager } from "./drawings/manager";
+import { createApi } from "./journal/api";
+import { errorMessage } from "./errors";
+import { planReplay, settingsFromRequest } from "./journal/replay";
+import { createJournal } from "./journal/view";
 
 const API = (import.meta.env.VITE_API as string | undefined) ?? "http://127.0.0.1:8000";
 const TFS: [number, string][] = [
@@ -57,6 +61,7 @@ const store = {
 
 let st: State = initial();
 let ws: WebSocket | null = null;
+let currentSid = ""; // id of the session this tab is connected to
 let tf: number = store.get("tf", 60);
 if (!TFS.some(([s]) => s === tf)) tf = 60;
 let pointValue = 20;
@@ -400,9 +405,48 @@ interface SessionCfg {
   end?: string;
 }
 
-async function newSession(cfg: SessionCfg): Promise<string | null> {
+/** `request` replaces the body built from `cfg` (used to recreate a journaled trade's session);
+ * `seekTo` (epoch seconds) moves the replay there as soon as the socket opens. */
+async function newSession(
+  cfg: SessionCfg,
+  request?: Record<string, unknown>,
+  seekTo?: number,
+): Promise<string | null> {
+  const body: Record<string, unknown> = request ?? {
+    source: cfg.source,
+    instrument: cfg.instrument,
+    start_time: cfg.startTime,
+    balance: cfg.balance,
+    tfs: TFS.map(([s]) => s),
+  };
+  if (!request && cfg.source === "parquet") {
+    body.start = cfg.start;
+    body.end = cfg.end;
+  }
+  // Ask for the new session first: if it fails (no data for those dates, server down) the replay
+  // that is already on screen must survive untouched.
+  const hadSession = ws !== null;
+  if (!hadSession) setConn("creating session…");
+  let sid: string;
+  try {
+    const r = await fetch(`${API}/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(typeof j.detail === "string" ? j.detail : "Couldn't start the session");
+    }
+    sid = (await r.json()).id;
+  } catch (e) {
+    if (!hadSession) setConn("server error", "bad");
+    return errorMessage(e);
+  }
+  // success: now replace the old session
   ws?.close();
   ws = null;
+  currentSid = sid;
   clearLines();
   st = initial();
   replayStart = 0;
@@ -414,42 +458,12 @@ async function newSession(cfg: SessionCfg): Promise<string | null> {
   pointValue = cfg.instrument === "MNQ" ? 2 : 20;
   drawings.load(`drawings:v1:${cfg.source}:${cfg.instrument}`);
   $("symbol").textContent = `${cfg.instrument} · CME`;
-  setConn("creating session…");
-  const body: Record<string, unknown> = {
-    source: cfg.source,
-    instrument: cfg.instrument,
-    start_time: cfg.startTime,
-    balance: cfg.balance,
-    tfs: TFS.map(([s]) => s),
-  };
-  if (cfg.source === "parquet") {
-    body.start = cfg.start;
-    body.end = cfg.end;
-  }
-  let sid: string;
-  try {
-    const r = await fetch(`${API}/sessions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      throw new Error(typeof j.detail === "string" ? j.detail : r.statusText);
-    }
-    sid = (await r.json()).id;
-  } catch (e) {
-    const msg = (e as Error).message;
-    setConn(`server error`, "bad");
-    return msg === "Failed to fetch"
-      ? `Can't reach the API at ${API}. Is the server running?`
-      : msg;
-  }
   const sock = new WebSocket(`${API.replace(/^http/, "ws")}/ws/${sid}?tf=${tf}`); // server sends only this timeframe's bars
   ws = sock;
   sock.onopen = () => {
     setConn("connected", "on");
     syncSpeed();
+    if (seekTo !== undefined) send({ cmd: "seek", ts: seekTo });
   };
   sock.onclose = () => {
     if (ws === sock) setConn("disconnected", "bad");
@@ -629,13 +643,57 @@ $<HTMLInputElement>("startTime").value = cfgSaved.startTime ?? "09:00";
 $<HTMLInputElement>("balance").value = String(cfgSaved.balance ?? 50000);
 $<HTMLInputElement>("start").value = cfgSaved.start ?? "";
 $<HTMLInputElement>("end").value = cfgSaved.end ?? "";
+const HINTS: Record<string, string> = {
+  synthetic:
+    "Synthetic: 3 trading days of generated 1-second bars. The replay starts on the last day, with the earlier days shown as chart history.",
+  parquet:
+    "The replay starts on the start date at the time above; the 3 trading days before it load as chart history.",
+};
+const syncHint = () => {
+  $("dlgHint").textContent = HINTS[$<HTMLSelectElement>("source").value] ?? "";
+};
 syncReal();
-$("source").onchange = syncReal;
+syncHint();
+$("source").onchange = () => {
+  syncReal();
+  syncHint();
+};
 $("newSession").onclick = () => {
   $("dlgErr").textContent = "";
   dlg.showModal();
 };
 $("dlgCancel").onclick = () => dlg.close();
+
+// ---- journal: trade log, notes, analytics, calendar (journal/view.ts)
+const journalApi = createApi(API);
+async function replayTrade(id: number): Promise<string | null> {
+  let info;
+  try {
+    info = await journalApi.replay(id);
+  } catch (e) {
+    return errorMessage(e);
+  }
+  const plan = planReplay(info, currentSid);
+  if (plan.kind === "error") return plan.message;
+  if (plan.kind === "seek") {
+    send({ cmd: "seek", ts: plan.ts });
+    return null;
+  }
+  return newSession(settingsFromRequest(plan.request), plan.request, plan.seekTo);
+}
+const journal = createJournal($<HTMLDialogElement>("journalDlg"), {
+  api: journalApi,
+  fmtTime: (t) =>
+    tzTime(t, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+  onReplay: replayTrade,
+});
+$("journalBtn").onclick = () => void journal.open();
 const readCfg = (): SessionCfg => ({
   source: $<HTMLSelectElement>("source").value,
   instrument: $<HTMLSelectElement>("inst").value,
