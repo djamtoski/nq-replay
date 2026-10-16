@@ -89,40 +89,40 @@ def clean_notes(raw: dict) -> dict:
     out: dict = {}
     for k in raw:
         if k not in NOTE_FIELDS:
-            raise ValueError(f"unknown field {k!r}")
+            raise ValueError(f"Unknown field {k}")
     for k in ("setup", "emotion"):
         if k in raw:
             v = raw[k]
             if v is not None:
                 if not isinstance(v, str):
-                    raise ValueError(f"{k} must be text")
+                    raise ValueError(f"{k.capitalize()} must be text")
                 v = v.strip()
                 if len(v) > MAX_TAG:
-                    raise ValueError(f"{k} is longer than {MAX_TAG} characters")
+                    raise ValueError(f"{k.capitalize()} is longer than {MAX_TAG} characters")
             out[k] = v or None
     if "rating" in raw:
         v = raw["rating"]
         if v is not None and (isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 5):
-            raise ValueError("rating must be 1 to 5")
+            raise ValueError("Rating must be 1 to 5")
         out["rating"] = v
     if "mistakes" in raw:
         v = raw["mistakes"]
         if not isinstance(v, list) or len(v) > MAX_MISTAKES:
-            raise ValueError(f"mistakes must be a list of at most {MAX_MISTAKES} tags")
+            raise ValueError(f"At most {MAX_MISTAKES} mistake tags")
         tags: list[str] = []
         for t in v:
             if not isinstance(t, str):
-                raise ValueError("mistake tags must be text")
+                raise ValueError("Mistake tags must be text")
             t = t.strip()
             if len(t) > MAX_TAG:
-                raise ValueError(f"a mistake tag is longer than {MAX_TAG} characters")
+                raise ValueError(f"A mistake tag is longer than {MAX_TAG} characters")
             if t and t not in tags:
                 tags.append(t)
         out["mistakes"] = json.dumps(tags)
     if "note" in raw:
         v = raw["note"]
         if not isinstance(v, str) or len(v) > MAX_TEXT:
-            raise ValueError(f"note must be text of at most {MAX_TEXT} characters")
+            raise ValueError(f"Notes are limited to {MAX_TEXT} characters")
         out["note"] = v
     return out
 

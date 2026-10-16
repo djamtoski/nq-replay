@@ -48,7 +48,7 @@ describe("journal api", () => {
     ).rejects.toThrow("rating must be 1 to 5");
     await expect(
       api(async () => new Response("oops", { status: 500, statusText: "Server Error" })).tags(),
-    ).rejects.toThrow("Server Error");
+    ).rejects.toThrow("Request failed");
     await expect(
       api(
         async () =>
@@ -57,11 +57,11 @@ describe("journal api", () => {
             statusText: "Bad",
           }),
       ).tags(),
-    ).rejects.toThrow("Bad");
+    ).rejects.toThrow("Request failed");
     await expect(
       api(async () => {
         throw new TypeError("Failed to fetch");
       }).tags(),
-    ).rejects.toThrow("Can't reach the API at http://x");
+    ).rejects.toThrow("Can't reach the server. Is it running?");
   });
 });
