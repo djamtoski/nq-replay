@@ -10,6 +10,7 @@ Look-ahead safety: only bars below the replay cursor are ever serialized.
 Binds to localhost by default; WebSocket Origin is checked so a random web page in your
 browser can't drive a local session (cross-site WebSocket hijacking).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,9 +19,9 @@ import math
 import random
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -28,14 +29,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from nq_data import SYMBOL_MAX, SYMBOL_PATTERN
-from nq_replay import (MNQ, NQ, Bar, Broker, ExecModel, Order, OType, ReplaySession, Side, Clock, stats)
+from nq_replay import (
+    MNQ,
+    NQ,
+    Bar,
+    Broker,
+    Clock,
+    ExecModel,
+    Order,
+    OType,
+    ReplaySession,
+    Side,
+    stats,
+)
 
-ALLOWED_ORIGINS = {"http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173",
-                   "http://127.0.0.1:5173", "http://localhost:8000", "http://127.0.0.1:8000"}
+ALLOWED_ORIGINS = {
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+}
 MAX_SESSIONS = 20
-FRAME_S = 0.05            # playback frame; bars/frame = elapsed * speed / bar_duration
+FRAME_S = 0.05  # playback frame; bars/frame = elapsed * speed / bar_duration
 MAX_BARS_PER_FRAME = 2000
-HISTORY = 500             # closed bars per timeframe sent on reset
+HISTORY = 500  # closed bars per timeframe sent on reset
 S = 10**9
 NY = ZoneInfo("America/New_York")
 log = logging.getLogger("replay")
@@ -43,14 +62,18 @@ DEFAULT_TFS = [1, 15, 60, 300, 900, 3600, 14400]
 
 
 # --------------------------------------------------------------------------- data sources
-def synthetic_bars(n: int = 6 * 3600, start_utc: str = "2025-03-10T13:00:00+00:00", seed: int = 1) -> list[Bar]:
+def synthetic_bars(
+    n: int = 6 * 3600, start_utc: str = "2025-03-10T13:00:00+00:00", seed: int = 1
+) -> list[Bar]:
     """Short flat series (used by tests / quick demos). No warm-up."""
     rnd = random.Random(seed)
     t0 = int(datetime.fromisoformat(start_utc).timestamp() * S)
     px, out = 20000.0, []
     for i in range(n):
         o, px = px, round((px + rnd.gauss(0, 0.6)) * 4) / 4
-        out.append(Bar(t0 + i * S, o, max(o, px) + .25, min(o, px) - .25, px, rnd.randint(1, 20), S))
+        out.append(
+            Bar(t0 + i * S, o, max(o, px) + 0.25, min(o, px) - 0.25, px, rnd.randint(1, 20), S)
+        )
     return out
 
 
@@ -65,19 +88,34 @@ def synthetic_days(seed: int = 1) -> list[Bar]:
     out: list[Bar] = []
     px = 20000.0
     for d in (date(2025, 3, 6), date(2025, 3, 7), date(2025, 3, 10)):
-        start = datetime.combine(d - timedelta(days=1), time(18), tzinfo=NY).astimezone(timezone.utc)
-        end = datetime.combine(d, time(17), tzinfo=NY).astimezone(timezone.utc)
+        start = datetime.combine(d - timedelta(days=1), time(18), tzinfo=NY).astimezone(UTC)
+        end = datetime.combine(d, time(17), tzinfo=NY).astimezone(UTC)
         t = int(start.timestamp())
         t_end = int(end.timestamp())
         trend, sigma = 0.0, 0.3
         while t < t_end:
-            if t % 600 == 0 or t == int(start.timestamp()):       # re-evaluate every 10 minutes
-                local_h = datetime.fromtimestamp(t, tz=timezone.utc).astimezone(NY).hour
-                sigma = 0.9 if local_h in (9, 10) else 0.55 if (2 <= local_h < 5 or 11 <= local_h < 16) else 0.3
-                trend = rnd.gauss(0, 0.04)                          # slow drift
+            if t % 600 == 0 or t == int(start.timestamp()):  # re-evaluate every 10 minutes
+                local_h = datetime.fromtimestamp(t, tz=UTC).astimezone(NY).hour
+                sigma = (
+                    0.9
+                    if local_h in (9, 10)
+                    else 0.55
+                    if (2 <= local_h < 5 or 11 <= local_h < 16)
+                    else 0.3
+                )
+                trend = rnd.gauss(0, 0.04)  # slow drift
             o, px = px, round((px + trend + rnd.gauss(0, sigma)) * 4) / 4
-            out.append(Bar(t * S, o, max(o, px) + (0.25 if rnd.random() < .5 else 0),
-                           min(o, px) - (0.25 if rnd.random() < .5 else 0), px, rnd.randint(1, 20), S))
+            out.append(
+                Bar(
+                    t * S,
+                    o,
+                    max(o, px) + (0.25 if rnd.random() < 0.5 else 0),
+                    min(o, px) - (0.25 if rnd.random() < 0.5 else 0),
+                    px,
+                    rnd.randint(1, 20),
+                    S,
+                )
+            )
             t += 1
     return out
 
@@ -109,14 +147,20 @@ def _clean(x):
 class CreateSession(BaseModel):
     source: Literal["synthetic", "parquet"] = "synthetic"
     instrument: Literal["NQ", "MNQ"] = "NQ"
-    symbol: str = Field("NQ.v.0", pattern=SYMBOL_PATTERN, max_length=SYMBOL_MAX)   # a directory name: same rule as nq_data.check_symbol
-    start: Optional[date] = None
-    end: Optional[date] = None
+    symbol: str = Field(
+        "NQ.v.0", pattern=SYMBOL_PATTERN, max_length=SYMBOL_MAX
+    )  # a directory name: same rule as nq_data.check_symbol
+    start: date | None = None
+    end: date | None = None
     back_adjust: bool = False
     balance: float = Field(50_000.0, gt=0)
-    bars: Optional[int] = Field(None, gt=0, le=2_000_000)   # synthetic test mode: short flat series, no warm-up
-    start_time: str = Field("09:00", pattern=r"^\d{2}:\d{2}$")   # New York wall clock of the replay start
-    warmup_days: int = Field(3, ge=0, le=10)                  # parquet: history loaded before `start`
+    bars: int | None = Field(
+        None, gt=0, le=2_000_000
+    )  # synthetic test mode: short flat series, no warm-up
+    start_time: str = Field(
+        "09:00", pattern=r"^\d{2}:\d{2}$"
+    )  # New York wall clock of the replay start
+    warmup_days: int = Field(3, ge=0, le=10)  # parquet: history loaded before `start`
     tfs: list[int] = DEFAULT_TFS
     latency_ms: int = Field(150, ge=0, le=10_000)
     slippage_ticks: int = Field(1, ge=0, le=50)
@@ -132,7 +176,7 @@ class CmdPause(BaseModel):
 
 class CmdSpeed(BaseModel):
     cmd: Literal["speed"]
-    value: float = Field(gt=0, le=100_000)    # replay seconds per real second
+    value: float = Field(gt=0, le=100_000)  # replay seconds per real second
 
 
 class CmdStep(BaseModel):
@@ -147,7 +191,7 @@ class CmdStepBack(BaseModel):
 
 class CmdSeek(BaseModel):
     cmd: Literal["seek"]
-    ts: int                      # epoch seconds
+    ts: int  # epoch seconds
 
 
 class CmdOrder(BaseModel):
@@ -155,10 +199,10 @@ class CmdOrder(BaseModel):
     side: Literal["long", "short"]
     qty: int = Field(1, ge=1, le=1000)
     otype: Literal["market", "limit", "stop"] = "market"
-    price: Optional[float] = None
-    sl: Optional[float] = None
-    tp: Optional[float] = None
-    trail_ticks: Optional[int] = Field(None, ge=1)
+    price: float | None = None
+    sl: float | None = None
+    tp: float | None = None
+    trail_ticks: int | None = Field(None, ge=1)
     reduce_only: bool = False
 
 
@@ -170,24 +214,37 @@ class CmdCancel(BaseModel):
 class CmdModify(BaseModel):
     cmd: Literal["modify"]
     position_id: int
-    sl: Optional[float] = None
-    tp: Optional[float] = None
+    sl: float | None = None
+    tp: float | None = None
 
 
 class CmdClose(BaseModel):
     cmd: Literal["close"]
     position_id: int
-    qty: Optional[int] = Field(None, ge=1)
+    qty: int | None = Field(None, ge=1)
 
 
 class CmdView(BaseModel):
     """Declare which timeframe (seconds) this client is displaying; the server then sends only that one."""
+
     cmd: Literal["view"]
     tf: int = Field(gt=0)
 
 
-Cmd = Annotated[Union[CmdPlay, CmdPause, CmdSpeed, CmdStep, CmdStepBack, CmdSeek, CmdOrder,
-                      CmdCancel, CmdModify, CmdClose, CmdView], Field(discriminator="cmd")]
+Cmd = Annotated[
+    CmdPlay
+    | CmdPause
+    | CmdSpeed
+    | CmdStep
+    | CmdStepBack
+    | CmdSeek
+    | CmdOrder
+    | CmdCancel
+    | CmdModify
+    | CmdClose
+    | CmdView,
+    Field(discriminator="cmd"),
+]
 _cmd = TypeAdapter(Cmd)
 
 
@@ -201,27 +258,59 @@ def _finite(x):
 
 
 def _positions(br: Broker) -> list[dict]:
-    return [{"id": p.id, "side": p.side.name.lower(), "qty": p.qty, "entry": p.entry, "sl": p.sl,
-             "tp": p.tp, "trail_ticks": p.trail_ticks, "opened": p.opened_ns // S} for p in br.positions.values()]
+    return [
+        {
+            "id": p.id,
+            "side": p.side.name.lower(),
+            "qty": p.qty,
+            "entry": p.entry,
+            "sl": p.sl,
+            "tp": p.tp,
+            "trail_ticks": p.trail_ticks,
+            "opened": p.opened_ns // S,
+        }
+        for p in br.positions.values()
+    ]
 
 
 def _orders(br: Broker) -> list[dict]:
-    return [{"id": o.id, "side": o.side.name.lower(), "qty": o.qty, "otype": o.otype.value,
-             "price": o.price, "sl": o.sl, "tp": o.tp, "status": o.status.value} for o in br.orders]
+    return [
+        {
+            "id": o.id,
+            "side": o.side.name.lower(),
+            "qty": o.qty,
+            "otype": o.otype.value,
+            "price": o.price,
+            "sl": o.sl,
+            "tp": o.tp,
+            "status": o.status.value,
+        }
+        for o in br.orders
+    ]
 
 
 def _trade(t) -> dict:
-    return {"side": t.side.name.lower(), "qty": t.qty, "entry": t.entry, "exit": t.exit, "pnl": t.pnl,
-            "r": t.r_mult, "opened": t.opened_ns // S, "closed": t.closed_ns // S, "reason": t.reason}
+    return {
+        "side": t.side.name.lower(),
+        "qty": t.qty,
+        "entry": t.entry,
+        "exit": t.exit,
+        "pnl": t.pnl,
+        "r": t.r_mult,
+        "opened": t.opened_ns // S,
+        "closed": t.closed_ns // S,
+        "reason": t.reason,
+    }
 
 
 # --------------------------------------------------------------------------- session runtime
 @dataclass
 class Client:
     """One connected browser tab. Bar data is sent per client: only for the timeframe it displays."""
+
     ws: WebSocket
     tf: int
-    sent_ts: int = -1        # open time (ns) of the newest closed bar of `tf` this client already has
+    sent_ts: int = -1  # open time (ns) of the newest closed bar of `tf` this client already has
     sent_trades: int = 0
 
 
@@ -229,13 +318,20 @@ class Runtime:
     def __init__(self, sid: str, ss: ReplaySession):
         self.id, self.ss = sid, ss
         self.clients: dict[WebSocket, Client] = {}
-        self.task: Optional[asyncio.Task] = None
+        self.task: asyncio.Task | None = None
 
     # ---- messages
     def account(self) -> dict:
         br = self.ss.broker
-        return _clean({"balance": br.balance, "equity": br.equity(), "margin": br.margin_used(),
-                       "unrealized": br.unrealized(), "stats": stats(self.ss)})
+        return _clean(
+            {
+                "balance": br.balance,
+                "equity": br.equity(),
+                "margin": br.margin_used(),
+                "unrealized": br.unrealized(),
+                "stats": stats(self.ss),
+            }
+        )
 
     def sessions(self) -> dict:
         a = self.ss.asia
@@ -247,7 +343,9 @@ class Runtime:
         closed = ss.mtf.closed(tf)
         c.sent_ts = closed[-1].ts if closed else -1
         f = ss.mtf.forming(tf)
-        return {str(tf): [_bar(b) for b in list(closed)[-HISTORY:]]}, {str(tf): _bar(f) if f else None}
+        return {str(tf): [_bar(b) for b in list(closed)[-HISTORY:]]}, {
+            str(tf): _bar(f) if f else None
+        }
 
     def _shared(self) -> dict:
         """
@@ -257,50 +355,74 @@ class Runtime:
         """
         ss = self.ss
         last = ss.bars[ss.cursor - 1] if ss.cursor else None
-        return {"now": ss.now // S, "cursor": ss.cursor, "total": len(ss.bars), "bar": _bar(last) if last else None,
-                "positions": _positions(ss.broker), "orders": _orders(ss.broker),
-                "account": self.account(), "sessions": self.sessions()}
+        return {
+            "now": ss.now // S,
+            "cursor": ss.cursor,
+            "total": len(ss.bars),
+            "bar": _bar(last) if last else None,
+            "positions": _positions(ss.broker),
+            "orders": _orders(ss.broker),
+            "account": self.account(),
+            "sessions": self.sessions(),
+        }
 
-    def reset_msg(self, c: Client, sh: Optional[dict] = None) -> dict:
+    def reset_msg(self, c: Client, sh: dict | None = None) -> dict:
         ss = self.ss
         sh = sh or self._shared()
         hist, forming = self._history(c)
         c.sent_trades = len(ss.broker.trades)
-        return {"type": "reset", "tf": c.tf, "now": sh["now"], "cursor": sh["cursor"], "total": sh["total"],
-                "state": ss.state.name.lower(), "speed": ss.speed, "history": hist, "forming": forming,
-                "positions": sh["positions"], "orders": sh["orders"], "trades": [_trade(t) for t in ss.broker.trades],
-                "account": sh["account"], "sessions": sh["sessions"]}
+        return {
+            "type": "reset",
+            "tf": c.tf,
+            "now": sh["now"],
+            "cursor": sh["cursor"],
+            "total": sh["total"],
+            "state": ss.state.name.lower(),
+            "speed": ss.speed,
+            "history": hist,
+            "forming": forming,
+            "positions": sh["positions"],
+            "orders": sh["orders"],
+            "trades": [_trade(t) for t in ss.broker.trades],
+            "account": sh["account"],
+            "sessions": sh["sessions"],
+        }
 
     def view_msg(self, c: Client) -> dict:
         """Sent when a client switches timeframe: just the new timeframe's bars."""
         hist, forming = self._history(c)
         return {"type": "view", "tf": c.tf, "history": hist, "forming": forming}
 
-    def tick_msg(self, c: Client, sh: Optional[dict] = None) -> dict:
+    def tick_msg(self, c: Client, sh: dict | None = None) -> dict:
         ss, tf = self.ss, c.tf
         sh = sh or self._shared()
-        fresh: list[Bar] = []                       # newest first
+        fresh: list[Bar] = []  # newest first
         for b in reversed(ss.mtf.closed(tf)):
             if b.ts <= c.sent_ts:
                 break
             fresh.append(b)
         if fresh:
             c.sent_ts = fresh[0].ts
-        new_trades = [_trade(t) for t in ss.broker.trades[c.sent_trades:]]
+        new_trades = [_trade(t) for t in ss.broker.trades[c.sent_trades :]]
         c.sent_trades = len(ss.broker.trades)
         f = ss.mtf.forming(tf)
-        return {"type": "tick", "tf": tf, **sh,
-                "closed": {str(tf): [_bar(b) for b in reversed(fresh)]} if fresh else {},
-                "forming": {str(tf): _bar(f) if f else None}, "new_trades": new_trades}
+        return {
+            "type": "tick",
+            "tf": tf,
+            **sh,
+            "closed": {str(tf): [_bar(b) for b in reversed(fresh)]} if fresh else {},
+            "forming": {str(tf): _bar(f) if f else None},
+            "new_trades": new_trades,
+        }
 
     async def _send(self, c: Client, msg: dict) -> None:
         msg = _clean(msg)
         try:
             await c.ws.send_json(msg)
-        except (WebSocketDisconnect, RuntimeError):      # client went away
+        except (WebSocketDisconnect, RuntimeError):  # client went away
             self.clients.pop(c.ws, None)
         except Exception:
-            log.exception("failed to send %s message", msg.get("type"))   # a bug, not a disconnect
+            log.exception("failed to send %s message", msg.get("type"))  # a bug, not a disconnect
 
     async def broadcast(self, msg: dict) -> None:
         """Same message to every client (state changes, acks)."""
@@ -358,11 +480,14 @@ class Runtime:
                 pass
 
     # ---- commands
-    async def handle(self, c, client: Client) -> Optional[dict]:
+    async def handle(self, c, client: Client) -> dict | None:
         ss, br = self.ss, self.ss.broker
         if isinstance(c, CmdView):
             if c.tf not in ss.tfs:
-                return {"type": "error", "error": f"unknown timeframe {c.tf}; available: {list(ss.tfs)}"}
+                return {
+                    "type": "error",
+                    "error": f"unknown timeframe {c.tf}; available: {list(ss.tfs)}",
+                }
             client.tf = c.tf
             await self._send(client, self.view_msg(client))
         elif isinstance(c, CmdPlay):
@@ -371,7 +496,9 @@ class Runtime:
             await self.pause()
         elif isinstance(c, CmdSpeed):
             ss.speed = c.value
-            await self.broadcast({"type": "state", "state": ss.state.name.lower(), "speed": ss.speed})
+            await self.broadcast(
+                {"type": "state", "state": ss.state.name.lower(), "speed": ss.speed}
+            )
         elif isinstance(c, CmdStep):
             await self.pause()
             ss.step(c.n)
@@ -388,9 +515,17 @@ class Runtime:
         elif isinstance(c, CmdOrder):
             if ss.cursor == 0:
                 return {"type": "error", "error": "step the replay forward before placing orders"}
-            o = Order(Side.LONG if c.side == "long" else Side.SHORT, c.qty, OType(c.otype), c.price,
-                      c.sl, c.tp, c.trail_ticks, c.reduce_only)
-            ss.submit(o)    # via the session so the action is logged and survives step_back
+            o = Order(
+                Side.LONG if c.side == "long" else Side.SHORT,
+                c.qty,
+                OType(c.otype),
+                c.price,
+                c.sl,
+                c.tp,
+                c.trail_ticks,
+                c.reduce_only,
+            )
+            ss.submit(o)  # via the session so the action is logged and survives step_back
             await self.broadcast({"type": "order_ack", "order_id": o.id, "status": o.status.value})
             await self.broadcast_each(self.tick_msg)
         elif isinstance(c, CmdCancel):
@@ -411,17 +546,22 @@ class Runtime:
 
 # --------------------------------------------------------------------------- app
 app = FastAPI(title="NQ Replay")
-app.add_middleware(CORSMiddleware, allow_origins=sorted(ALLOWED_ORIGINS), allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware, allow_origins=sorted(ALLOWED_ORIGINS), allow_methods=["*"], allow_headers=["*"]
+)
 RUNTIMES: dict[str, Runtime] = {}
 
 
 def _build(req: CreateSession) -> ReplaySession:
     inst = NQ if req.instrument == "NQ" else MNQ
-    xm = ExecModel(latency_ms=req.latency_ms, slippage_ticks_market=req.slippage_ticks,
-                   slippage_ticks_stop=req.slippage_ticks)
+    xm = ExecModel(
+        latency_ms=req.latency_ms,
+        slippage_ticks_market=req.slippage_ticks,
+        slippage_ticks_stop=req.slippage_ticks,
+    )
     warm = 0
     if req.source == "synthetic":
-        if req.bars:                                  # test/demo mode: short series from bar 0
+        if req.bars:  # test/demo mode: short series from bar 0
             bars = synthetic_bars(req.bars)
         else:
             bars = synthetic_days()
@@ -432,13 +572,18 @@ def _build(req: CreateSession) -> ReplaySession:
         if req.end < req.start:
             raise HTTPException(422, "end is before start")
         import nq_data
+
         try:
-            bars = nq_data.load_bars(req.symbol, req.start - timedelta(days=req.warmup_days * 7 // 5 + 3),
-                                     req.end, back_adjust=req.back_adjust)
+            bars = nq_data.load_bars(
+                req.symbol,
+                req.start - timedelta(days=req.warmup_days * 7 // 5 + 3),
+                req.end,
+                back_adjust=req.back_adjust,
+            )
         except FileNotFoundError as e:
-            raise HTTPException(404, str(e))
-        except ValueError as e:                       # e.g. a symbol the loader rejects: a client error, not a 500
-            raise HTTPException(422, str(e))
+            raise HTTPException(404, str(e)) from e
+        except ValueError as e:  # e.g. a symbol the loader rejects: a client error, not a 500
+            raise HTTPException(422, str(e)) from e
         warm = start_index(bars, req.start, req.start_time)
         if warm >= len(bars):
             raise HTTPException(404, f"no data at or after {req.start} {req.start_time} NY")
@@ -454,10 +599,17 @@ def create_session(req: CreateSession) -> dict:
         raise HTTPException(429, "too many sessions")
     sid = uuid.uuid4().hex[:12]
     ss = _build(req)
-    ss.speed = 60.0       # initial only (replay-seconds per real second); the UI sends its own on connect
+    ss.speed = (
+        60.0  # initial only (replay-seconds per real second); the UI sends its own on connect
+    )
     RUNTIMES[sid] = Runtime(sid, ss)
-    return {"id": sid, "bars": len(ss.bars), "first": ss.bars[0].ts // S, "last": ss.bars[-1].ts // S,
-            "start_cursor": ss.cursor}
+    return {
+        "id": sid,
+        "bars": len(ss.bars),
+        "first": ss.bars[0].ts // S,
+        "last": ss.bars[-1].ts // S,
+        "start_cursor": ss.cursor,
+    }
 
 
 @app.get("/sessions/{sid}")
@@ -465,8 +617,13 @@ def get_session(sid: str) -> dict:
     rt = RUNTIMES.get(sid)
     if not rt:
         raise HTTPException(404, "unknown session")
-    return {"id": sid, "cursor": rt.ss.cursor, "total": len(rt.ss.bars), "state": rt.ss.state.name.lower(),
-            "account": rt.account()}
+    return {
+        "id": sid,
+        "cursor": rt.ss.cursor,
+        "total": len(rt.ss.bars),
+        "state": rt.ss.state.name.lower(),
+        "account": rt.account(),
+    }
 
 
 @app.delete("/sessions/{sid}")
@@ -479,7 +636,7 @@ async def delete_session(sid: str) -> dict:
 
 
 @app.websocket("/ws/{sid}")
-async def ws(websocket: WebSocket, sid: str, tf: Optional[int] = None) -> None:
+async def ws(websocket: WebSocket, sid: str, tf: int | None = None) -> None:
     """
     `?tf=<seconds>` selects the timeframe whose bars this client receives (change later with the `view`
     command). Omitted: 1m if the session has it, otherwise its first timeframe.
@@ -495,7 +652,7 @@ async def ws(websocket: WebSocket, sid: str, tf: Optional[int] = None) -> None:
     if tf is None:
         tf = 60 if 60 in rt.ss.tfs else rt.ss.tfs[0]
     if tf not in rt.ss.tfs:
-        await websocket.close(code=4400)       # unknown timeframe
+        await websocket.close(code=4400)  # unknown timeframe
         return
     await websocket.accept()
     client = Client(websocket, tf)
@@ -507,7 +664,9 @@ async def ws(websocket: WebSocket, sid: str, tf: Optional[int] = None) -> None:
             try:
                 c = _cmd.validate_python(raw)
             except ValidationError as e:
-                await websocket.send_json({"type": "error", "error": e.errors(include_url=False)[0]["msg"]})
+                await websocket.send_json(
+                    {"type": "error", "error": e.errors(include_url=False)[0]["msg"]}
+                )
                 continue
             err = await rt.handle(c, client)
             if err:
@@ -517,4 +676,4 @@ async def ws(websocket: WebSocket, sid: str, tf: Optional[int] = None) -> None:
     finally:
         rt.clients.pop(websocket, None)
         if not rt.clients:
-            await rt.pause()   # nobody watching: don't let playback run away
+            await rt.pause()  # nobody watching: don't let playback run away
