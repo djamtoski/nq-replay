@@ -24,3 +24,8 @@ data/
 Thumbs.db
 .idea/
 .vscode/
+
+# Coverage output
+coverage/
+web/coverage/
+.coverage

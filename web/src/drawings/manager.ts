@@ -1,31 +1,58 @@
 import type { CanvasRenderingTarget2D } from "fancy-canvas";
-import type { IChartApi, IPrimitivePaneRenderer, IPrimitivePaneView, ISeriesApi, ISeriesPrimitive, SeriesAttachedParameter, Time } from "lightweight-charts";
+import type {
+  IChartApi,
+  IPrimitivePaneRenderer,
+  IPrimitivePaneView,
+  ISeriesApi,
+  ISeriesPrimitive,
+  SeriesAttachedParameter,
+  Time,
+} from "lightweight-charts";
 import { hitTest, logicalToTime, sanitizeDrawings, timeToLogical, type XY } from "./geometry";
 import { drawDrawing, extraPx, projectPts, type Proj } from "./render";
-import { COLORS, DEFAULT_STYLE, NEED, TOOLS, svg, type Drawing, type DrawType, type Pt, type Style, type ToolId } from "./types";
+import {
+  COLORS,
+  DEFAULT_STYLE,
+  NEED,
+  TOOLS,
+  svg,
+  type Drawing,
+  type DrawType,
+  type Pt,
+  type Style,
+  type ToolId,
+} from "./types";
 
 export interface ManagerOpts {
   chart: IChartApi;
   series: ISeriesApi<"Candlestick">;
-  container: HTMLElement;          // element wrapping the chart canvas; receives pointer events
+  container: HTMLElement; // element wrapping the chart canvas; receives pointer events
   toolbar: HTMLElement;
   propbar: HTMLElement;
   textInput: HTMLInputElement;
-  getTimes: () => number[];        // live bar times of the series (data order)
-  getInterval: () => number;       // seconds per bar of the current timeframe
+  getTimes: () => number[]; // live bar times of the series (data order)
+  getInterval: () => number; // seconds per bar of the current timeframe
   getPointValue: () => number;
   fmtPrice: (p: number) => string;
-  notify?: (message: string) => void;   // surfaced to the user (e.g. storage failures)
+  notify?: (message: string) => void; // surfaced to the user (e.g. storage failures)
 }
 
-interface Drag { kind: "handle" | "move"; id: string; index: number; startLogical: number; startPrice: number; orig: Drawing; moved: boolean }
+interface Drag {
+  kind: "handle" | "move";
+  id: string;
+  index: number;
+  startLogical: number;
+  startPrice: number;
+  orig: Drawing;
+  moved: boolean;
+}
 
-const HIT_TOL = 6;           // px: mouse / pen
-const TOUCH_TOL = 14;        // px: a fingertip is far less precise than a cursor
+const HIT_TOL = 6; // px: mouse / pen
+const TOUCH_TOL = 14; // px: a fingertip is far less precise than a cursor
 const DOUBLE_TAP_MS = 400;
-const GESTURE_STALE_MS = 2000;   // a pointer silent this long while "down" has lost its pointerup
+const GESTURE_STALE_MS = 2000; // a pointer silent this long while "down" has lost its pointerup
 const MAX_UNDO = 60;
-const BRUSH_MIN_PX = 3;      // decimation: ignore moves smaller than this
+const BRUSH_MIN_PX = 3; // decimation: ignore moves smaller than this
 const BRUSH_MAX_POINTS = 1500;
 
 export class DrawingManager {
@@ -43,10 +70,10 @@ export class DrawingManager {
   private storageKey = "";
   private editingId: string | null = null;
   private readonly ac = new AbortController();
-  private claimed = false;                      // we own the current gesture: keep the chart from also panning
-  private tol = HIT_TOL;                         // hit tolerance for the current pointer type
+  private claimed = false; // we own the current gesture: keep the chart from also panning
+  private tol = HIT_TOL; // hit tolerance for the current pointer type
   private lastTap: { id: string; t: number; x: number; y: number } | null = null;
-  private gesture: { id: number; t: number } | null = null;   // the pointer that owns the current press-drag-release
+  private gesture: { id: number; t: number } | null = null; // the pointer that owns the current press-drag-release
   private releaseTimer = 0;
   private requestUpdate: (() => void) | null = null;
   private readonly primitive: ISeriesPrimitive<Time>;
@@ -55,13 +82,19 @@ export class DrawingManager {
   constructor(private o: ManagerOpts) {
     const renderer: IPrimitivePaneRenderer = {
       draw: (target: CanvasRenderingTarget2D) =>
-        target.useMediaCoordinateSpace(({ context, mediaSize }) => this.paint(context, mediaSize.width, mediaSize.height)),
+        target.useMediaCoordinateSpace(({ context, mediaSize }) =>
+          this.paint(context, mediaSize.width, mediaSize.height),
+        ),
     };
     this.view = { zOrder: () => "top", renderer: () => renderer };
     const views = [this.view];
     this.primitive = {
-      attached: (p: SeriesAttachedParameter<Time>) => { this.requestUpdate = p.requestUpdate; },
-      detached: () => { this.requestUpdate = null; },
+      attached: (p: SeriesAttachedParameter<Time>) => {
+        this.requestUpdate = p.requestUpdate;
+      },
+      detached: () => {
+        this.requestUpdate = null;
+      },
       paneViews: () => views,
     };
     o.series.attachPrimitive(this.primitive);
@@ -74,62 +107,100 @@ export class DrawingManager {
   /** Switch the drawing set (e.g. when the session's data source/contract changes). */
   load(key: string): void {
     this.storageKey = key;
-    this.selectedId = null; this.draft = null; this.undo = [];
+    this.selectedId = null;
+    this.draft = null;
+    this.undo = [];
     // storage is untrusted: validate every item so one bad record can't throw inside the renderer each frame
-    try { this.drawings = sanitizeDrawings(JSON.parse(localStorage.getItem(key) ?? "[]")); } catch { this.drawings = []; }
-    this.syncUi(); this.redraw();
+    try {
+      this.drawings = sanitizeDrawings(JSON.parse(localStorage.getItem(key) ?? "[]"));
+    } catch {
+      this.drawings = [];
+    }
+    this.syncUi();
+    this.redraw();
   }
   private save(): void {
     if (!this.storageKey) return;
-    try { localStorage.setItem(this.storageKey, JSON.stringify(this.drawings)); }
-    catch { this.o.notify?.("Couldn't save drawings (browser storage is full or blocked); they will be lost on reload."); }
+    try {
+      localStorage.setItem(this.storageKey, JSON.stringify(this.drawings));
+    } catch {
+      this.o.notify?.(
+        "Couldn't save drawings (browser storage is full or blocked); they will be lost on reload.",
+      );
+    }
   }
-  private pushUndo(): void { this.undo.push(JSON.stringify(this.drawings)); if (this.undo.length > MAX_UNDO) this.undo.shift(); }
+  private pushUndo(): void {
+    this.undo.push(JSON.stringify(this.drawings));
+    if (this.undo.length > MAX_UNDO) this.undo.shift();
+  }
   private doUndo(): void {
     const prev = this.undo.pop();
     if (prev === undefined) return;
     this.drawings = JSON.parse(prev) as Drawing[];
     if (!this.drawings.some((d) => d.id === this.selectedId)) this.selectedId = null;
-    this.save(); this.syncUi(); this.redraw();
+    this.save();
+    this.syncUi();
+    this.redraw();
   }
 
-  redraw(): void { this.requestUpdate?.(); }
+  redraw(): void {
+    this.requestUpdate?.();
+  }
 
   // ------------------------------------------------------------------ coordinates
-  private times(): number[] { return this.o.getTimes(); }
+  private times(): number[] {
+    return this.o.getTimes();
+  }
   private proj(W: number, H: number): Proj {
-    const times = this.times(), iv = this.o.getInterval();
+    const times = this.times(),
+      iv = this.o.getInterval();
     const ts = this.o.chart.timeScale();
     return {
       x: (t) => ts.logicalToCoordinate(timeToLogical(times, t, iv) as never) ?? NaN,
       y: (p) => this.o.series.priceToCoordinate(p) ?? NaN,
-      W, H, pointValue: this.o.getPointValue(),
+      W,
+      H,
+      pointValue: this.o.getPointValue(),
       barsBetween: (a, b) => Math.abs(timeToLogical(times, b, iv) - timeToLogical(times, a, iv)),
       fmtPrice: this.o.fmtPrice,
     };
   }
   private paneSize(): { w: number; h: number } {
     const c = this.o.container;
-    return { w: c.clientWidth - this.o.chart.priceScale("right").width(), h: c.clientHeight - this.o.chart.timeScale().height() };
+    return {
+      w: c.clientWidth - this.o.chart.priceScale("right").width(),
+      h: c.clientHeight - this.o.chart.timeScale().height(),
+    };
   }
   /** Mouse event -> pixel + data coordinates, or null when outside the plotting pane (axes etc.). */
   private mouse(e: MouseEvent): { xy: XY; pt: Pt; logical: number } | null {
     const r = this.o.container.getBoundingClientRect();
-    const x = e.clientX - r.left, y = e.clientY - r.top;
+    const x = e.clientX - r.left,
+      y = e.clientY - r.top;
     const { w, h } = this.paneSize();
     if (x < 0 || y < 0 || x > w || y > h) return null;
     const logical = this.o.chart.timeScale().coordinateToLogical(x);
     const price = this.o.series.coordinateToPrice(y);
     if (logical === null || price === null) return null;
-    return { xy: { x, y }, pt: { t: logicalToTime(this.times(), logical, this.o.getInterval()), p: price }, logical };
+    return {
+      xy: { x, y },
+      pt: { t: logicalToTime(this.times(), logical, this.o.getInterval()), p: price },
+      logical,
+    };
   }
 
   // ------------------------------------------------------------------ painting
   private current(): Drawing[] {
     if (!this.draft) return this.drawings;
-    const pts = this.hoverPt && this.draft.type !== "brush" ? [...this.draft.pts, this.hoverPt] : this.draft.pts;
+    const pts =
+      this.hoverPt && this.draft.type !== "brush"
+        ? [...this.draft.pts, this.hoverPt]
+        : this.draft.pts;
     if (pts.length === 0) return this.drawings;
-    return [...this.drawings, { id: "draft", type: this.draft.type, pts, style: { ...this.style, dash: true }, text: "" }];
+    return [
+      ...this.drawings,
+      { id: "draft", type: this.draft.type, pts, style: { ...this.style, dash: true }, text: "" },
+    ];
   }
   private paint(ctx: CanvasRenderingContext2D, W: number, H: number): void {
     if (!this.visible) return;
@@ -153,13 +224,19 @@ export class DrawingManager {
     }
     return null;
   }
-  private select(id: string | null): void { this.selectedId = id; this.syncUi(); this.redraw(); }
-  private selected(): Drawing | undefined { return this.drawings.find((d) => d.id === this.selectedId); }
+  private select(id: string | null): void {
+    this.selectedId = id;
+    this.syncUi();
+    this.redraw();
+  }
+  private selected(): Drawing | undefined {
+    return this.drawings.find((d) => d.id === this.selectedId);
+  }
 
   // ------------------------------------------------------------------ pointer handling
   private bind(): void {
     const c = this.o.container;
-    const signal = this.ac.signal;      // aborting it in destroy() removes every listener below at once
+    const signal = this.ac.signal; // aborting it in destroy() removes every listener below at once
     // Pointer Events cover mouse, touch and pen with one code path. touch-action:none stops the browser
     // from scrolling/zooming the page (and cancelling our pointer stream) while a finger drags on the chart.
     // (Trade-off: this also stops the browser scrolling/zooming the page by dragging on the chart; the chart
@@ -170,25 +247,53 @@ export class DrawingManager {
     c.style.userSelect = "none";
     c.style.setProperty("-webkit-user-select", "none");
     c.style.setProperty("-webkit-touch-callout", "none");
-    c.addEventListener("contextmenu", (e) => { if (this.gesture || this.claimed) e.preventDefault(); }, { signal });
+    c.addEventListener(
+      "contextmenu",
+      (e) => {
+        if (this.gesture || this.claimed) e.preventDefault();
+      },
+      { signal },
+    );
     c.addEventListener("pointerdown", (e) => this.onDown(e), { capture: true, signal });
     window.addEventListener("pointermove", (e) => this.onMove(e), { signal });
     window.addEventListener("pointerup", (e) => this.onUp(e), { signal });
     // Only OUR pointer's cancellation abandons the gesture (not a scroll elsewhere on the page); losing the
     // window mid-gesture (alt-tab, system dialog) loses the pointerup, so abandon it then too.
-    window.addEventListener("pointercancel", (e) => { if (this.gesture && e.pointerId === this.gesture.id) this.abort(); }, { signal });
-    window.addEventListener("blur", () => { if (this.gesture) this.abort(); }, { signal });
+    window.addEventListener(
+      "pointercancel",
+      (e) => {
+        if (this.gesture && e.pointerId === this.gesture.id) this.abort();
+      },
+      { signal },
+    );
+    window.addEventListener(
+      "blur",
+      () => {
+        if (this.gesture) this.abort();
+      },
+      { signal },
+    );
     // The chart library has its own mouse/touch handlers that pointer events don't reach: while we own a
     // gesture, stop those events at the container so the chart doesn't pan underneath a drawing drag.
     for (const type of ["mousedown", "touchstart", "touchmove"]) {
-      c.addEventListener(type, (e) => { if (this.claimed) e.stopPropagation(); }, { capture: true, signal });
+      c.addEventListener(
+        type,
+        (e) => {
+          if (this.claimed) e.stopPropagation();
+        },
+        { capture: true, signal },
+      );
     }
     document.addEventListener("keydown", (e) => this.onKey(e), { signal });
-    this.o.textInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") this.commitText(true);
-      else if (e.key === "Escape") this.commitText(false);
-      e.stopPropagation();
-    }, { signal });
+    this.o.textInput.addEventListener(
+      "keydown",
+      (e) => {
+        if (e.key === "Enter") this.commitText(true);
+        else if (e.key === "Escape") this.commitText(false);
+        e.stopPropagation();
+      },
+      { signal },
+    );
     this.o.textInput.addEventListener("blur", () => this.commitText(true), { signal });
   }
 
@@ -199,8 +304,11 @@ export class DrawingManager {
     this.o.series.detachPrimitive(this.primitive);
     this.requestUpdate = null;
     const s = this.o.container.style;
-    s.touchAction = ""; s.cursor = ""; s.userSelect = "";
-    s.removeProperty("-webkit-user-select"); s.removeProperty("-webkit-touch-callout");
+    s.touchAction = "";
+    s.cursor = "";
+    s.userSelect = "";
+    s.removeProperty("-webkit-user-select");
+    s.removeProperty("-webkit-touch-callout");
   }
 
   /**
@@ -210,22 +318,32 @@ export class DrawingManager {
    * (touchstart/touchmove/touchend) still fire around the gesture, which is what `claimed` blocks.
    */
   private claim(e: PointerEvent): void {
-    window.clearTimeout(this.releaseTimer);           // a pending release from the previous gesture must not clear this claim
+    window.clearTimeout(this.releaseTimer); // a pending release from the previous gesture must not clear this claim
     this.claimed = true;
     this.gesture = { id: e.pointerId, t: e.timeStamp };
-    e.stopPropagation(); e.preventDefault();
+    e.stopPropagation();
+    e.preventDefault();
   }
   /** End the gesture; the claim lingers briefly so the touchend that follows pointerup is still swallowed. */
   private release(): void {
     this.gesture = null;
     window.clearTimeout(this.releaseTimer);
-    this.releaseTimer = window.setTimeout(() => { this.claimed = false; }, 60);
+    this.releaseTimer = window.setTimeout(() => {
+      this.claimed = false;
+    }, 60);
   }
   /** Is this event from the pointer that owns the current gesture (or is there no gesture)? */
-  private own(e: PointerEvent): boolean { return !this.gesture || e.pointerId === this.gesture.id; }
+  private own(e: PointerEvent): boolean {
+    return !this.gesture || e.pointerId === this.gesture.id;
+  }
 
   private onDown(e: PointerEvent): void {
-    if (!e.isPrimary || (e.pointerType === "mouse" && e.button !== 0) || e.target === this.o.textInput) return;
+    if (
+      !e.isPrimary ||
+      (e.pointerType === "mouse" && e.button !== 0) ||
+      e.target === this.o.textInput
+    )
+      return;
     if (this.gesture) {
       // Another pointer pressing while ours is active is ignored, unless ours went quiet (its pointerup was lost).
       const stale = e.timeStamp - this.gesture.t > GESTURE_STALE_MS;
@@ -236,16 +354,28 @@ export class DrawingManager {
     // preventDefault below would stop the text box from blurring, so commit an open editor explicitly
     if (!this.o.textInput.hidden) this.commitText(true);
     const m = this.mouse(e);
-    if (!m) return;                                   // axis area: let the chart handle it
+    if (!m) return; // axis area: let the chart handle it
     const prev = this.lastTap;
-    this.lastTap = null;                              // any press resets the double-press timer; a text hit below re-arms it
-    if (this.tool !== "cursor") { this.claim(e); this.toolDown(m); return; }
+    this.lastTap = null; // any press resets the double-press timer; a text hit below re-arms it
+    if (this.tool !== "cursor") {
+      this.claim(e);
+      this.toolDown(m);
+      return;
+    }
     const hit = this.hitAt(m.xy);
-    if (!hit) { if (this.selectedId) this.select(null); return; }        // empty space: let the chart pan
+    if (!hit) {
+      if (this.selectedId) this.select(null);
+      return;
+    } // empty space: let the chart pan
     this.claim(e);
     // second press on the SAME text label within DOUBLE_TAP_MS edits it (works for mouse and touch alike)
     if (hit.d.type === "text") {
-      if (prev && prev.id === hit.d.id && e.timeStamp - prev.t < DOUBLE_TAP_MS && Math.hypot(prev.x - m.xy.x, prev.y - m.xy.y) < 20) {
+      if (
+        prev &&
+        prev.id === hit.d.id &&
+        e.timeStamp - prev.t < DOUBLE_TAP_MS &&
+        Math.hypot(prev.x - m.xy.x, prev.y - m.xy.y) < 20
+      ) {
         this.select(hit.d.id);
         this.openText(hit.d.id, hit.d.text ?? "");
         return;
@@ -253,13 +383,26 @@ export class DrawingManager {
       this.lastTap = { id: hit.d.id, t: e.timeStamp, x: m.xy.x, y: m.xy.y };
     }
     this.select(hit.d.id);
-    this.drag = { kind: hit.kind === "body" ? "move" : "handle", id: hit.d.id, index: hit.index, startLogical: m.logical, startPrice: m.pt.p, orig: JSON.parse(JSON.stringify(hit.d)) as Drawing, moved: false };
+    this.drag = {
+      kind: hit.kind === "body" ? "move" : "handle",
+      id: hit.d.id,
+      index: hit.index,
+      startLogical: m.logical,
+      startPrice: m.pt.p,
+      orig: JSON.parse(JSON.stringify(hit.d)) as Drawing,
+      moved: false,
+    };
   }
 
   private toolDown(m: { xy: XY; pt: Pt }): void {
     const type = this.tool as DrawType;
     this.downXY = m.xy;
-    if (type === "brush") { this.draft = { type, pts: [m.pt] }; this.brushing = true; this.redraw(); return; }
+    if (type === "brush") {
+      this.draft = { type, pts: [m.pt] };
+      this.brushing = true;
+      this.redraw();
+      return;
+    }
     if (!this.draft) this.draft = { type, pts: [] };
     this.draft.pts.push(m.pt);
     this.hoverPt = null;
@@ -272,11 +415,17 @@ export class DrawingManager {
 
   private onMove(e: PointerEvent): void {
     if (!e.isPrimary || !this.own(e)) return;
-    if (this.gesture) this.gesture.t = e.timeStamp;       // proof the pointer is still alive (see onDown's stale check)
+    if (this.gesture) this.gesture.t = e.timeStamp; // proof the pointer is still alive (see onDown's stale check)
     const active = this.drag || this.draft || this.brushing;
     // idle hover (mouse/pen only; a finger has no hover): only over the chart, at most once per frame
     if (!active) {
-      if (e.pointerType === "touch" || this.tool !== "cursor" || !(e.target instanceof Node) || !this.o.container.contains(e.target)) return;
+      if (
+        e.pointerType === "touch" ||
+        this.tool !== "cursor" ||
+        !(e.target instanceof Node) ||
+        !this.o.container.contains(e.target)
+      )
+        return;
       this.tol = HIT_TOL;
       this.hoverEvent = e;
       if (!this.hoverQueued) {
@@ -293,19 +442,28 @@ export class DrawingManager {
       return;
     }
     const m = this.mouse(e);
-    if (this.drag) { if (m) this.dragTo(m); return; }
+    if (this.drag) {
+      if (m) this.dragTo(m);
+      return;
+    }
     if (this.brushing && this.draft && m) {
       const last = this.draft.pts[this.draft.pts.length - 1];
       const { w, h } = this.paneSize();
       const P = this.proj(w, h);
       if (Math.hypot(P.x(last.t) - m.xy.x, P.y(last.p) - m.xy.y) > BRUSH_MIN_PX) {
         this.draft.pts.push(m.pt);
-        if (this.draft.pts.length >= BRUSH_MAX_POINTS) { this.brushing = false; this.finish(); }
+        if (this.draft.pts.length >= BRUSH_MAX_POINTS) {
+          this.brushing = false;
+          this.finish();
+        }
         this.redraw();
       }
       return;
     }
-    if (this.draft) { this.hoverPt = m?.pt ?? this.hoverPt; this.redraw(); }
+    if (this.draft) {
+      this.hoverPt = m?.pt ?? this.hoverPt;
+      this.redraw();
+    }
   }
 
   /** The gesture can't complete (browser cancelled the pointer, window lost focus, pointerup lost): abandon it cleanly. */
@@ -315,13 +473,15 @@ export class DrawingManager {
       if (dr.moved) {
         const i = this.drawings.findIndex((x) => x.id === dr.id);
         if (i >= 0) this.drawings[i] = dr.orig;
-        this.undo.pop();                              // the undo entry pushed on first move is now meaningless
+        this.undo.pop(); // the undo entry pushed on first move is now meaningless
       }
       this.drag = null;
     }
     this.brushing = false;
-    this.draft = null; this.hoverPt = null;
-    this.release(); this.redraw();
+    this.draft = null;
+    this.hoverPt = null;
+    this.release();
+    this.redraw();
   }
 
   private onUp(e: PointerEvent): void {
@@ -334,12 +494,15 @@ export class DrawingManager {
         if (m) this.dragTo(m);
         this.save();
       }
-      this.drag = null; return;
+      this.drag = null;
+      return;
     }
     if (this.brushing) {
       this.brushing = false;
-      if (this.draft && this.draft.pts.length > 1) this.finish(); else this.draft = null;
-      this.redraw(); return;
+      if (this.draft && this.draft.pts.length > 1) this.finish();
+      else this.draft = null;
+      this.redraw();
+      return;
     }
     // press-drag-release creates a 2-point drawing in one gesture
     if (this.draft && this.draft.pts.length === 1 && this.downXY) {
@@ -356,11 +519,19 @@ export class DrawingManager {
     const dr = this.drag!;
     const d = this.drawings.find((x) => x.id === dr.id);
     if (!d) return;
-    if (!dr.moved) { this.undo.push(JSON.stringify(this.drawings.map((x) => (x.id === dr.id ? dr.orig : x)))); dr.moved = true; }
-    const times = this.times(), iv = this.o.getInterval();
+    if (!dr.moved) {
+      this.undo.push(JSON.stringify(this.drawings.map((x) => (x.id === dr.id ? dr.orig : x))));
+      dr.moved = true;
+    }
+    const times = this.times(),
+      iv = this.o.getInterval();
     if (dr.kind === "move") {
-      const dl = m.logical - dr.startLogical, dp = m.pt.p - dr.startPrice;
-      d.pts = dr.orig.pts.map((p) => ({ t: logicalToTime(times, timeToLogical(times, p.t, iv) + dl, iv), p: p.p + dp }));
+      const dl = m.logical - dr.startLogical,
+        dp = m.pt.p - dr.startPrice;
+      d.pts = dr.orig.pts.map((p) => ({
+        t: logicalToTime(times, timeToLogical(times, p.t, iv) + dl, iv),
+        p: p.p + dp,
+      }));
       if (dr.orig.stop !== undefined) d.stop = dr.orig.stop + dp;
     } else if ((d.type === "long" || d.type === "short") && dr.index === 2) {
       d.stop = m.pt.p;
@@ -377,18 +548,34 @@ export class DrawingManager {
   private onKey(e: KeyboardEvent): void {
     const t = e.target as HTMLElement;
     if (t.matches("input,select,textarea") || document.querySelector("dialog[open]")) return;
-    if (e.key === "Escape") { this.draft = null; this.brushing = false; this.setTool("cursor"); this.select(null); }
-    else if ((e.key === "Delete" || e.key === "Backspace") && this.selectedId) { e.preventDefault(); this.remove(this.selectedId); }
-    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); this.doUndo(); }
+    if (e.key === "Escape") {
+      this.draft = null;
+      this.brushing = false;
+      this.setTool("cursor");
+      this.select(null);
+    } else if ((e.key === "Delete" || e.key === "Backspace") && this.selectedId) {
+      e.preventDefault();
+      this.remove(this.selectedId);
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+      e.preventDefault();
+      this.doUndo();
+    }
   }
 
   // ------------------------------------------------------------------ mutations
   private finish(): void {
     const dr = this.draft;
     if (!dr) return;
-    this.draft = null; this.hoverPt = null; this.brushing = false;
-    const d: Drawing = { id: Math.random().toString(36).slice(2, 10), type: dr.type, pts: dr.pts, style: { ...this.style } };
-    if (d.type === "long" || d.type === "short") d.stop = d.pts[0].p - (d.pts[1].p - d.pts[0].p);   // mirrored 1:1 until dragged
+    this.draft = null;
+    this.hoverPt = null;
+    this.brushing = false;
+    const d: Drawing = {
+      id: Math.random().toString(36).slice(2, 10),
+      type: dr.type,
+      pts: dr.pts,
+      style: { ...this.style },
+    };
+    if (d.type === "long" || d.type === "short") d.stop = d.pts[0].p - (d.pts[1].p - d.pts[0].p); // mirrored 1:1 until dragged
     if (d.type === "text") d.text = "";
     this.pushUndo();
     this.drawings.push(d);
@@ -401,19 +588,30 @@ export class DrawingManager {
     this.pushUndo();
     this.drawings = this.drawings.filter((d) => d.id !== id);
     if (this.selectedId === id) this.selectedId = null;
-    this.save(); this.syncUi(); this.redraw();
+    this.save();
+    this.syncUi();
+    this.redraw();
   }
   private clearAll(): void {
     if (!this.drawings.length) return;
     if (!window.confirm(`Delete all ${this.drawings.length} drawings?`)) return;
-    this.pushUndo(); this.drawings = []; this.selectedId = null;
-    this.save(); this.syncUi(); this.redraw();
+    this.pushUndo();
+    this.drawings = [];
+    this.selectedId = null;
+    this.save();
+    this.syncUi();
+    this.redraw();
   }
   private patchStyle(p: Partial<Style>): void {
     const d = this.selected();
-    if (d) { this.pushUndo(); d.style = { ...d.style, ...p }; this.save(); }
-    this.style = { ...this.style, ...p };      // also becomes the default for the next drawing
-    this.syncUi(); this.redraw();
+    if (d) {
+      this.pushUndo();
+      d.style = { ...d.style, ...p };
+      this.save();
+    }
+    this.style = { ...this.style, ...p }; // also becomes the default for the next drawing
+    this.syncUi();
+    this.redraw();
   }
 
   // ------------------------------------------------------------------ text tool
@@ -423,48 +621,74 @@ export class DrawingManager {
     const P = this.proj(this.paneSize().w, this.paneSize().h);
     const inp = this.o.textInput;
     this.editingId = id;
-    inp.value = value; inp.hidden = false;
-    inp.style.left = `${P.x(d.pts[0].t)}px`; inp.style.top = `${P.y(d.pts[0].p) - 14}px`;
+    inp.value = value;
+    inp.hidden = false;
+    inp.style.left = `${P.x(d.pts[0].t)}px`;
+    inp.style.top = `${P.y(d.pts[0].p) - 14}px`;
     setTimeout(() => inp.focus(), 0);
   }
   private commitText(save: boolean): void {
-    const inp = this.o.textInput, id = this.editingId;
+    const inp = this.o.textInput,
+      id = this.editingId;
     if (!id || inp.hidden) return;
-    this.editingId = null; inp.hidden = true;
+    this.editingId = null;
+    inp.hidden = true;
     const d = this.drawings.find((x) => x.id === id);
     if (!d) return;
     const v = inp.value.trim();
     if (save && v) {
-      if (d.text && d.text !== v) this.pushUndo();      // editing existing text is undoable (creation was already recorded)
-      d.text = v; this.save();
+      if (d.text && d.text !== v) this.pushUndo(); // editing existing text is undoable (creation was already recorded)
+      d.text = v;
+      this.save();
+    } else if (!d.text) {
+      this.drawings = this.drawings.filter((x) => x.id !== id);
+      this.selectedId = null;
+      this.save();
     }
-    else if (!d.text) { this.drawings = this.drawings.filter((x) => x.id !== id); this.selectedId = null; this.save(); }
-    this.syncUi(); this.redraw();
+    this.syncUi();
+    this.redraw();
   }
 
   // ------------------------------------------------------------------ UI (toolbar + property bar)
   setTool(t: ToolId): void {
-    this.tool = t; this.draft = null; this.hoverPt = null; this.brushing = false;
-    if (t !== "cursor") this.visible = true;      // never let the user draw while drawings are hidden
+    this.tool = t;
+    this.draft = null;
+    this.hoverPt = null;
+    this.brushing = false;
+    if (t !== "cursor") this.visible = true; // never let the user draw while drawings are hidden
     this.o.container.style.cursor = t === "cursor" ? "" : "crosshair";
-    this.syncUi(); this.redraw();
+    this.syncUi();
+    this.redraw();
   }
   private buildToolbar(): void {
     const tb = this.o.toolbar;
-    tb.innerHTML = TOOLS.map((t) => `<button data-tool="${t.id}" title="${t.label}" aria-label="${t.label}">${t.icon}</button>`).join("") +
+    tb.innerHTML =
+      TOOLS.map(
+        (t) =>
+          `<button data-tool="${t.id}" title="${t.label}" aria-label="${t.label}">${t.icon}</button>`,
+      ).join("") +
       `<span class="hsep"></span>` +
       `<button data-act="eye" title="Show / hide drawings" aria-label="Show or hide drawings">${EYE}</button>` +
       `<button data-act="trash" title="Delete all drawings" aria-label="Delete all drawings">${TRASH}</button>`;
-    tb.addEventListener("click", (e) => {
-      const b = (e.target as HTMLElement).closest("button");
-      if (!b) return;
-      if (b.dataset.tool) this.setTool(b.dataset.tool as ToolId);
-      else if (b.dataset.act === "eye") { this.visible = !this.visible; this.syncUi(); this.redraw(); }
-      else if (b.dataset.act === "trash") this.clearAll();
-    }, { signal: this.ac.signal });
+    tb.addEventListener(
+      "click",
+      (e) => {
+        const b = (e.target as HTMLElement).closest("button");
+        if (!b) return;
+        if (b.dataset.tool) this.setTool(b.dataset.tool as ToolId);
+        else if (b.dataset.act === "eye") {
+          this.visible = !this.visible;
+          this.syncUi();
+          this.redraw();
+        } else if (b.dataset.act === "trash") this.clearAll();
+      },
+      { signal: this.ac.signal },
+    );
   }
   private syncUi(): void {
-    this.o.toolbar.querySelectorAll<HTMLButtonElement>("button[data-tool]").forEach((b) => b.classList.toggle("active", b.dataset.tool === this.tool));
+    this.o.toolbar
+      .querySelectorAll<HTMLButtonElement>("button[data-tool]")
+      .forEach((b) => b.classList.toggle("active", b.dataset.tool === this.tool));
     this.o.toolbar.querySelector('[data-act="eye"]')?.classList.toggle("active", !this.visible);
     const sel = this.selected();
     const pb = this.o.propbar;
@@ -473,10 +697,15 @@ export class DrawingManager {
     if (!show) return;
     const st = sel?.style ?? this.style;
     pb.innerHTML =
-      COLORS.map((c) => `<button class="sw${c === st.color ? " on" : ""}" data-color="${c}" style="background:${c}" aria-label="Color ${c}"></button>`).join("") +
+      COLORS.map(
+        (c) =>
+          `<button class="sw${c === st.color ? " on" : ""}" data-color="${c}" style="background:${c}" aria-label="Color ${c}"></button>`,
+      ).join("") +
       `<select data-width aria-label="Line width">${[1, 2, 3, 4].map((w) => `<option value="${w}"${w === st.width ? " selected" : ""}>${w}px</option>`).join("")}</select>` +
       `<button data-dash class="${st.dash ? "on" : ""}" title="Dashed" aria-label="Dashed">╌</button>` +
-      (sel ? `<button data-del class="danger" title="Delete (Del)" aria-label="Delete drawing">Delete</button>` : "");
+      (sel
+        ? `<button data-del class="danger" title="Delete (Del)" aria-label="Delete drawing">Delete</button>`
+        : "");
     pb.onclick = (e) => {
       const t = (e.target as HTMLElement).closest("button");
       if (!t) return;
@@ -484,9 +713,14 @@ export class DrawingManager {
       else if (t.hasAttribute("data-dash")) this.patchStyle({ dash: !st.dash });
       else if (t.hasAttribute("data-del") && this.selectedId) this.remove(this.selectedId);
     };
-    pb.onchange = (e) => { const s = e.target as HTMLSelectElement; if (s.hasAttribute("data-width")) this.patchStyle({ width: Number(s.value) }); };
+    pb.onchange = (e) => {
+      const s = e.target as HTMLSelectElement;
+      if (s.hasAttribute("data-width")) this.patchStyle({ width: Number(s.value) });
+    };
   }
 }
 
-const EYE = svg('<path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10z"/><circle cx="10" cy="10" r="2.3"/>');
+const EYE = svg(
+  '<path d="M2 10s3-5.5 8-5.5S18 10 18 10s-3 5.5-8 5.5S2 10 2 10z"/><circle cx="10" cy="10" r="2.3"/>',
+);
 const TRASH = svg('<path d="M4 6h12M8 6V4h4v2M6 6l.7 10h6.6L14 6"/>');

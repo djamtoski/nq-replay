@@ -58,10 +58,18 @@ Client -> server commands: `play`, `pause`, `speed`, `step`, `step_back`, `seek`
 `close`, `view`. A message built for a timeframe the user has since left can still arrive; clients should not
 repaint the chart from it (see `drawsChart` in `web/src/store.ts`).
 
-## Tests
+## Tests and checks
 ```bash
 python -m pytest -q          # engine, data, server
 cd web && npm test && npx tsc --noEmit
+```
+
+CI runs the checks below on every PR (plus dependency audits, CodeQL and weekly Dependabot updates):
+```bash
+pip install -r requirements-dev.txt
+ruff check . && ruff format --check . && mypy nq_replay.py nq_data.py server.py
+python -m pytest -q --cov                # fails under 80% coverage (pyproject.toml)
+cd web && npm run lint && npm run format:check && npm run coverage   # coverage thresholds in vitest.config.ts
 ```
 
 ## Drawing tools

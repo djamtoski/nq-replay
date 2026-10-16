@@ -1,22 +1,38 @@
-from datetime import datetime, timezone
+from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime
 
 import pytest
 
-from nq_replay import (NQ, Bar, Broker, ClosedTrade, ExecModel, MTFAggregator, Order, OType, ReplaySession,
-                       Side, active_sessions, SessionRange, stats)
+from nq_replay import (
+    NQ,
+    Bar,
+    Broker,
+    ClosedTrade,
+    ExecModel,
+    MTFAggregator,
+    Order,
+    OType,
+    ReplaySession,
+    SessionRange,
+    Side,
+    active_sessions,
+    stats,
+)
 
 S = 10**9
 
 
 def ns(y, m, d, hh, mm=0, ss=0):
-    return int(datetime(y, m, d, hh, mm, ss, tzinfo=timezone.utc).timestamp() * S)
+    return int(datetime(y, m, d, hh, mm, ss, tzinfo=UTC).timestamp() * S)
 
 
 def bar(ts, o, h, l, c, dur=S):
     return Bar(ts, o, h, l, c, 1, dur)
 
 
-ZERO = ExecModel(latency_ms=0, slippage_ticks_market=0, slippage_ticks_stop=0, limit_requires_trade_through=False)
+ZERO = ExecModel(
+    latency_ms=0, slippage_ticks_market=0, slippage_ticks_stop=0, limit_requires_trade_through=False
+)
 T0 = ns(2025, 3, 10, 14)
 
 
@@ -42,9 +58,9 @@ def test_market_fills_at_open_plus_slippage():
 def test_latency_delays_fill_one_bar():
     b = broker(ExecModel(latency_ms=1500, slippage_ticks_market=0))
     b.submit(T0, Order(Side.LONG, 1, OType.MARKET))
-    b.on_bar(bar(T0, 100, 100, 100, 100))       # closes at T0+1s < active_from
+    b.on_bar(bar(T0, 100, 100, 100, 100))  # closes at T0+1s < active_from
     assert not b.positions
-    b.on_bar(bar(T0 + S, 101, 101, 101, 101))   # closes T0+2s >= T0+1.5s
+    b.on_bar(bar(T0 + S, 101, 101, 101, 101))  # closes T0+2s >= T0+1.5s
     assert next(iter(b.positions.values())).entry == 101
 
 
@@ -58,7 +74,7 @@ def test_limit_gap_gives_price_improvement():
 def test_limit_trade_through_required():
     b = broker(ExecModel(latency_ms=0, limit_requires_trade_through=True))
     b.submit(T0 - S, Order(Side.LONG, 1, OType.LIMIT, price=100))
-    b.on_bar(bar(T0, 101, 102, 100, 101))        # touch only
+    b.on_bar(bar(T0, 101, 102, 100, 101))  # touch only
     assert not b.positions
     b.on_bar(bar(T0 + S, 101, 101, 99.75, 100))  # trades through by 1 tick
     assert next(iter(b.positions.values())).entry == 100
@@ -101,7 +117,7 @@ def test_short_side_symmetry():
     b.on_bar(bar(T0, 100, 100, 100, 100))
     b.on_bar(bar(T0 + S, 100, 101, 94, 95))
     t = b.trades[-1]
-    assert t.reason == "tp" and t.pnl == 5 * 20          # trade pnl is gross
+    assert t.reason == "tp" and t.pnl == 5 * 20  # trade pnl is gross
     assert b.balance == pytest.approx(100_000 + 100 - 5.0)  # net of 2 commissions
 
 
@@ -119,7 +135,7 @@ def test_trailing_stop_moves_up_only_and_applies_next_bar():
     p = open_long(b, trail=40)  # 10 points
     b.on_bar(bar(T0 + S, 100, 120, 100, 120))
     assert p.sl == 110
-    b.on_bar(bar(T0 + 2 * S, 120, 120, 115, 116))   # pullback, still above sl
+    b.on_bar(bar(T0 + 2 * S, 120, 120, 115, 116))  # pullback, still above sl
     assert p.sl == 110
     b.on_bar(bar(T0 + 3 * S, 116, 117, 109, 110))
     assert b.trades[-1].reason == "sl" and b.trades[-1].exit == 110
@@ -138,7 +154,7 @@ def test_partial_close_then_full():
 
 def test_reduce_only_never_flips_position():
     b = broker()
-    p = open_long(b, qty=1)
+    open_long(b, qty=1)
     b.submit(T0, Order(Side.SHORT, 5, OType.MARKET, reduce_only=True))
     b.on_bar(bar(T0 + S, 100, 100, 100, 100))
     assert not b.positions
@@ -170,7 +186,7 @@ def test_htf_bar_closes_only_after_last_base_bar():
     feed(a, start, 59)
     assert len(a.closed(60)) == 0
     a.on_base_bar(bar(start + 59 * S, 159, 160, 158, 160))
-    assert len(a.closed(60)) == 0          # last base bar emitted, but bucket only rolls on next bar
+    assert len(a.closed(60)) == 0  # last base bar emitted, but bucket only rolls on next bar
     a.on_base_bar(bar(start + 60 * S, 1, 1, 1, 1))
     assert len(a.closed(60)) == 1
     c = a.closed(60)[0]
@@ -194,19 +210,22 @@ def test_daily_bucket_aligns_to_1800_ny():
 
 
 # ---------------- sessions / DST ----------------
-@pytest.mark.parametrize("utc, expected", [
-    (ns(2025, 3, 7, 14, 30), "NY_AM"),     # EST: 09:30 NY
-    (ns(2025, 3, 10, 13, 30), "NY_AM"),    # EDT (after Mar 9 switch): 09:30 NY
-    (ns(2025, 11, 3, 14, 30), "NY_AM"),    # EST again (after Nov 2 switch)
-    (ns(2025, 11, 3, 14, 29), None),
-])
+@pytest.mark.parametrize(
+    "utc, expected",
+    [
+        (ns(2025, 3, 7, 14, 30), "NY_AM"),  # EST: 09:30 NY
+        (ns(2025, 3, 10, 13, 30), "NY_AM"),  # EDT (after Mar 9 switch): 09:30 NY
+        (ns(2025, 11, 3, 14, 30), "NY_AM"),  # EST again (after Nov 2 switch)
+        (ns(2025, 11, 3, 14, 29), None),
+    ],
+)
 def test_ny_am_start_across_dst(utc, expected):
     got = active_sessions(utc)
     assert (expected in got) if expected else ("NY_AM" not in got)
 
 
 def test_asia_wraps_midnight():
-    assert "ASIA" in active_sessions(ns(2025, 3, 10, 3, 0))   # 23:00 NY prior evening (EDT)
+    assert "ASIA" in active_sessions(ns(2025, 3, 10, 3, 0))  # 23:00 NY prior evening (EDT)
 
 
 def test_asia_not_active_at_1800_ny():
@@ -227,12 +246,13 @@ def test_asia_range_accumulates_per_session_day():
 # ---------------- replay determinism ----------------
 def mk_bars(n=2000):
     import random
+
     rnd = random.Random(3)
     px, out = 20000.0, []
     for i in range(n):
         o = px
         px = round((px + rnd.gauss(0, 1)) * 4) / 4
-        out.append(bar(T0 + i * S, o, max(o, px) + .25, min(o, px) - .25, px))
+        out.append(bar(T0 + i * S, o, max(o, px) + 0.25, min(o, px) - 0.25, px))
     return out
 
 
@@ -241,7 +261,7 @@ def test_step_back_is_deterministic_with_and_without_snapshots():
         s = ReplaySession(mk_bars(), snapshot_every=snap, exec_model=ZERO)
         n = {"i": 0}
 
-        def strat(b, ss):
+        def strat(b, ss, n=n):
             n["i"] += 1
             if n["i"] % 97 == 0:
                 ss.submit(Order(Side.LONG, 1, OType.MARKET, sl=b.c - 5, tp=b.c + 5))
@@ -251,7 +271,7 @@ def test_step_back_is_deterministic_with_and_without_snapshots():
         eq, nt = s.broker.equity(), len(s.broker.trades)
         s.step_back(1500)
         assert s.cursor == 500
-        n["i"] = 500           # strategy counter must mirror the cursor
+        n["i"] = 500  # strategy counter must mirror the cursor
         s.step(1500)
         assert s.broker.equity() == pytest.approx(eq) and len(s.broker.trades) == nt
 
@@ -285,7 +305,7 @@ def test_preload_builds_history_without_trading_and_sets_floor():
     s.step(100)
     s.submit(Order(Side.LONG, 1, OType.MARKET))
     s.step(50)
-    s.step_back(10_000)                    # clamps to the warm-up boundary, never below
+    s.step_back(10_000)  # clamps to the warm-up boundary, never below
     assert s.cursor == 300 and not s.broker.positions and len(s.mtf.closed(60)) == 4
     with pytest.raises(ValueError):
         s.preload(10)
@@ -299,7 +319,12 @@ def test_aggregator_matches_naive_resample():
     c = list(a.closed(60))
     assert len(c) == 16
     first = bars[:60]
-    assert (c[0].o, c[0].h, c[0].l, c[0].c) == (first[0].o, max(x.h for x in first), min(x.l for x in first), first[-1].c)
+    assert (c[0].o, c[0].h, c[0].l, c[0].c) == (
+        first[0].o,
+        max(x.h for x in first),
+        min(x.l for x in first),
+        first[-1].c,
+    )
     assert c[0].v == sum(x.v for x in first)
 
 
@@ -310,10 +335,12 @@ def test_mtf_clone_is_equal_and_independent():
         a.on_base_bar(b)
     c = a.clone()
     assert list(c.closed(60)) == list(a.closed(60)) and c.forming(300) == a.forming(300)
-    for b in mk_bars(200):                      # keep feeding the original; the clone must not move
+    for b in mk_bars(200):  # keep feeding the original; the clone must not move
         a.on_base_bar(Bar(b.ts + 10**6 * S, b.o, b.h, b.l, b.c, b.v, S))
     assert len(c.closed(60)) == 11 and len(a.closed(60)) > 11
-    c.on_base_bar(Bar(5 * 10**9 * S, 1, 1, 1, 1, 1, S))   # and mutating the clone must not touch the original
+    c.on_base_bar(
+        Bar(5 * 10**9 * S, 1, 1, 1, 1, 1, S)
+    )  # and mutating the clone must not touch the original
     assert a.forming(60).ts != c.forming(60).ts
 
 
@@ -322,10 +349,10 @@ def test_snapshots_are_capped_and_evenly_spread():
     s.step(4000)
     ks = sorted(s._snaps)
     assert len(ks) <= 8
-    assert ks[0] == 20                                      # earliest anchor kept
-    assert ks[-3:] == [3960, 3980, 4000]                    # newest few kept
+    assert ks[0] == 20  # earliest anchor kept
+    assert ks[-3:] == [3960, 3980, 4000]  # newest few kept
     gaps = [b - a for a, b in zip(ks, ks[1:])]
-    assert max(gaps) <= 4000 / 8 * 3                        # spread stays roughly even (bounded replay distance)
+    assert max(gaps) <= 4000 / 8 * 3  # spread stays roughly even (bounded replay distance)
 
 
 def test_floor_snapshot_survives_pruning():
@@ -348,11 +375,14 @@ def test_prune_invariants_hold_over_random_step_and_rewind_sequences():
     """Property check: whatever the sequence of plays and rewinds, the cap, earliest/newest retention and
     determinism of the final state hold."""
     import random
+
     rnd = random.Random(11)
     for trial in range(12):
         cap = rnd.choice([5, 6, 8, 12])
         every = rnd.choice([7, 25, 40])
-        s = ReplaySession(mk_bars(3000), snapshot_every=every, max_snapshots=cap, exec_model=ZERO, tfs=(60,))
+        s = ReplaySession(
+            mk_bars(3000), snapshot_every=every, max_snapshots=cap, exec_model=ZERO, tfs=(60,)
+        )
         floor = rnd.choice([0, 0, 90])
         if floor:
             s.preload(floor)
@@ -363,11 +393,13 @@ def test_prune_invariants_hold_over_random_step_and_rewind_sequences():
                 s.step_back(rnd.randint(1, 900))
             ks = sorted(s._snaps)
             assert len(ks) <= cap, (trial, ks)
-            assert all(k <= s.cursor for k in ks)                          # never a snapshot from the abandoned future
+            assert all(k <= s.cursor for k in ks)  # never a snapshot from the abandoned future
             if floor:
-                assert ks and ks[0] == floor                                # warm-up floor is never pruned
+                assert ks and ks[0] == floor  # warm-up floor is never pruned
             assert len(s.equity_curve) == s.cursor - s.floor
-        fresh = ReplaySession(mk_bars(3000), snapshot_every=10**9, max_snapshots=5, exec_model=ZERO, tfs=(60,))
+        fresh = ReplaySession(
+            mk_bars(3000), snapshot_every=10**9, max_snapshots=5, exec_model=ZERO, tfs=(60,)
+        )
         if floor:
             fresh.preload(floor)
         fresh.step(s.cursor - fresh.cursor)
@@ -379,37 +411,45 @@ def test_broker_clone_is_independent_but_shares_immutable_trades():
     b.submit(T0 - S, Order(Side.LONG, 1, OType.MARKET, sl=90, tp=110))
     b.submit(T0 - S, Order(Side.LONG, 1, OType.LIMIT, price=50))
     b.on_bar(bar(T0, 100, 100, 100, 100))
-    b.on_bar(bar(T0 + S, 100, 111, 100, 110))            # TP closes the position -> one closed trade
+    b.on_bar(bar(T0 + S, 100, 111, 100, 110))  # TP closes the position -> one closed trade
     b.submit(T0, Order(Side.SHORT, 1, OType.MARKET))
     c = b.clone()
-    assert c.trades is not b.trades and c.trades[0] is b.trades[0]       # shared immutable contents, separate list
+    assert (
+        c.trades is not b.trades and c.trades[0] is b.trades[0]
+    )  # shared immutable contents, separate list
     c.orders[0].price = 123.0
     c.balance += 1
     c.trades.append(c.trades[0])
     assert b.orders[0].price != 123.0 and b.balance != c.balance and len(b.trades) == 1
     b.on_bar(bar(T0 + 2 * S, 100, 100, 100, 100))
-    assert len(c.positions) == 0 and len(b.positions) == 1              # original kept running; the clone did not move
-    assert (c._next_id, b._next_id) == (5, 6)            # ids 1-4 were issued before the clone; only the original issued 5
+    assert (
+        len(c.positions) == 0 and len(b.positions) == 1
+    )  # original kept running; the clone did not move
+    assert (c._next_id, b._next_id) == (
+        5,
+        6,
+    )  # ids 1-4 were issued before the clone; only the original issued 5
 
 
 def test_closed_trades_are_immutable_so_sharing_them_is_safe():
     b = Broker(NQ, 100_000.0, ZERO)
     b.submit(T0 - S, Order(Side.LONG, 1, OType.MARKET, sl=90, tp=110))
-    b.on_bar(bar(T0, 100, 100, 100, 100)); b.on_bar(bar(T0 + S, 100, 111, 100, 110))
-    with pytest.raises(Exception):
+    b.on_bar(bar(T0, 100, 100, 100, 100))
+    b.on_bar(bar(T0 + S, 100, 111, 100, 110))
+    with pytest.raises(FrozenInstanceError):
         b.trades[0].pnl = 1e9
 
 
 def test_mtf_clone_carries_attributes_added_later():
     a = MTFAggregator([60])
-    a.future_option = "kept"                             # stands in for an attribute a later change adds to __init__
+    a.future_option = "kept"  # stands in for an attribute a later change adds to __init__
     assert a.clone().future_option == "kept"
 
 
 def test_rewind_fails_loudly_if_the_equity_curve_invariant_is_violated():
     s = ReplaySession(mk_bars(500), snapshot_every=50, exec_model=ZERO, tfs=(60,))
     s.step(300)
-    del s.equity_curve[10:]                              # corrupt: fewer points than bars stepped
+    del s.equity_curve[10:]  # corrupt: fewer points than bars stepped
     with pytest.raises(RuntimeError, match="equity curve has"):
         s.step_back(10)
 
@@ -420,14 +460,21 @@ def test_snapshots_with_many_trades_share_trade_objects_instead_of_copying_them(
     t = ClosedTrade(Side.LONG, 1, 1.0, 2.0, 20.0, 1.0, 0, 1, "tp")
     s.broker.trades.extend([t] * 5000)
     snap_a, snap_b = s._snapshot(), s._snapshot()
-    assert snap_a[0].trades[0] is t and snap_b[0].trades[100] is t       # one object, many snapshots
+    assert snap_a[0].trades[0] is t and snap_b[0].trades[100] is t  # one object, many snapshots
 
 
 @pytest.mark.parametrize("max_snaps", [5, 8])
 def test_pruned_session_rewinds_exactly_like_unpruned(max_snaps):
     """Pruning only changes how far a rewind must replay, never the resulting state."""
+
     def run(max_snapshots):
-        s = ReplaySession(mk_bars(3000), snapshot_every=25, max_snapshots=max_snapshots, exec_model=ZERO, tfs=(60, 300))
+        s = ReplaySession(
+            mk_bars(3000),
+            snapshot_every=25,
+            max_snapshots=max_snapshots,
+            exec_model=ZERO,
+            tfs=(60, 300),
+        )
         s.preload(60)
         s.step(200)
         s.submit(Order(Side.LONG, 2, OType.MARKET))
@@ -436,12 +483,22 @@ def test_pruned_session_rewinds_exactly_like_unpruned(max_snaps):
         s.modify(pid, sl=s.bars[499].c - 6, tp=s.bars[499].c + 9)
         s.step(1500)
         out = []
-        for back in (50, 700, 1200):                        # several rewinds, each followed by playing forward
+        for back in (50, 700, 1200):  # several rewinds, each followed by playing forward
             s.step_back(back)
-            out.append((s.cursor, round(s.broker.equity(), 6), len(s.broker.trades), list(s.equity_curve[-3:])))
+            out.append(
+                (
+                    s.cursor,
+                    round(s.broker.equity(), 6),
+                    len(s.broker.trades),
+                    list(s.equity_curve[-3:]),
+                )
+            )
             s.step(back // 2)
-            out.append((s.cursor, round(s.broker.equity(), 6), len(s.broker.trades), len(s.mtf.closed(60))))
+            out.append(
+                (s.cursor, round(s.broker.equity(), 6), len(s.broker.trades), len(s.mtf.closed(60)))
+            )
         return out, s
+
     pruned, sp = run(max_snaps)
     full, sf = run(10**6)
     assert pruned == full
@@ -471,40 +528,45 @@ def manual_session(snap):
 def test_manual_orders_survive_step_back(snap):
     def view(s):
         b = s.broker
-        return (s.cursor, round(b.equity(), 6), round(b.balance, 6), len(b.trades),
-                [(p.id, p.qty, p.entry, p.sl, p.tp) for p in b.positions.values()])
+        return (
+            s.cursor,
+            round(b.equity(), 6),
+            round(b.balance, 6),
+            len(b.trades),
+            [(p.id, p.qty, p.entry, p.sl, p.tp) for p in b.positions.values()],
+        )
 
     s = manual_session(snap)
     s.step(100)
-    s.submit(Order(Side.LONG, 2, OType.MARKET))                  # no SL/TP: stays open
+    s.submit(Order(Side.LONG, 2, OType.MARKET))  # no SL/TP: stays open
     s.step(30)
     (pid,) = s.broker.positions
-    s.modify(pid, sl=s.bars[129].c - 500, tp=None)               # logged at cursor 130
+    s.modify(pid, sl=s.bars[129].c - 500, tp=None)  # logged at cursor 130
     s.step(20)
-    at150 = view(s)                                              # state to be restored
+    at150 = view(s)  # state to be restored
     s.step(30)
-    s.close(pid, 1)                                              # logged at cursor 180 (partial)
+    s.close(pid, 1)  # logged at cursor 180 (partial)
     s.step(70)
     assert len(s.broker.trades) == 1 and s.broker.positions[pid].qty == 1
-    s.step_back(100)                                             # target 150: close is undone
+    s.step_back(100)  # target 150: close is undone
     assert view(s) == at150
     assert s.broker.positions[pid].qty == 2 and s.broker.positions[pid].sl is not None
-    s.step(100)                                                  # forward again: no close happens
+    s.step(100)  # forward again: no close happens
     assert s.broker.positions[pid].qty == 2 and not s.broker.trades
-    s.step_back(s.cursor)                                        # to bar 0 drops every action
+    s.step_back(s.cursor)  # to bar 0 drops every action
     assert not s.broker.positions and not s.broker.trades and s.broker.balance == 50_000.0
 
 
 def test_step_back_keeps_actions_at_target_and_discards_future():
     s = manual_session(50)
     s.step(100)
-    s.submit(Order(Side.LONG, 1, OType.MARKET))       # logged at cursor 100
+    s.submit(Order(Side.LONG, 1, OType.MARKET))  # logged at cursor 100
     s.step(10)
-    s.step_back(10)                                   # target == 100: order must still be pending
+    s.step_back(10)  # target == 100: order must still be pending
     assert len(s.broker.orders) == 1 and s.cursor == 100
     s.step(5)
     assert len(s.broker.positions) == 1
-    s.step_back(60)                                   # target 45: order (cursor 100) is in the future
+    s.step_back(60)  # target 45: order (cursor 100) is in the future
     assert not s.broker.orders and not s.actions
 
 
@@ -517,6 +579,6 @@ def test_ids_are_stable_across_replay():
     s.step_back(3)
     s.step(3)
     assert pid in s.broker.positions
-    s.close(pid, 1)                                   # id from before the replay still valid
+    s.close(pid, 1)  # id from before the replay still valid
     s.step(2)
     assert s.broker.positions[pid].qty == 1

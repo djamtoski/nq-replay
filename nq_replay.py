@@ -12,15 +12,17 @@ Modules (all in one file for readability; split along the section banners):
 Base feed = 1-second (or 1-minute) OHLCV bars, UTC epoch-ns timestamps.
 Conservative intrabar rule: when SL and TP are both inside one base bar, SL fills first.
 """
+
 from __future__ import annotations
 
 import copy
 import math
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime, time, timezone
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import UTC, datetime, time
 from enum import Enum
-from typing import Callable, Iterable, Iterator, NamedTuple, Optional
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 NY = ZoneInfo("America/New_York")
@@ -33,8 +35,8 @@ NY = ZoneInfo("America/New_York")
 class Instrument:
     symbol: str
     tick_size: float
-    point_value: float          # USD per 1.0 index point
-    init_margin: float          # per contract, intraday
+    point_value: float  # USD per 1.0 index point
+    init_margin: float  # per contract, intraday
     commission_per_side: float  # per contract
 
     @property
@@ -52,7 +54,8 @@ MNQ = Instrument("MNQ", 0.25, 2.0, 100.0, 0.75)
 class Bar(NamedTuple):
     """Immutable bar. A NamedTuple (not a dataclass): ~8x cheaper to build, which matters when
     warm-up and synthetic data create hundreds of thousands of them."""
-    ts: int      # bar OPEN time, epoch ns UTC
+
+    ts: int  # bar OPEN time, epoch ns UTC
     o: float
     h: float
     l: float
@@ -79,7 +82,7 @@ class Bar(NamedTuple):
 class SessionDef:
     name: str
     start: time  # New York wall-clock
-    end: time    # may be < start => wraps past midnight
+    end: time  # may be < start => wraps past midnight
 
 
 DEFAULT_SESSIONS = (
@@ -91,7 +94,7 @@ DEFAULT_SESSIONS = (
 
 
 def active_sessions(ts_ns: int, defs: Iterable[SessionDef] = DEFAULT_SESSIONS) -> list[str]:
-    t = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc).astimezone(NY).time()
+    t = datetime.fromtimestamp(ts_ns / 1e9, tz=UTC).astimezone(NY).time()
     out = []
     for d in defs:
         inside = d.start <= t < d.end if d.start < d.end else (t >= d.start or t < d.end)
@@ -103,17 +106,18 @@ def active_sessions(ts_ns: int, defs: Iterable[SessionDef] = DEFAULT_SESSIONS) -
 @dataclass
 class SessionRange:
     """Running high/low of a session (e.g. Asian range), only from bars already emitted."""
+
     name: str
     high: float = -math.inf
     low: float = math.inf
-    day: Optional[str] = None
+    day: int | None = None
 
     def update(self, bar: Bar, defs=DEFAULT_SESSIONS) -> None:
         if self.name not in active_sessions(bar.ts, defs):
             return
-        local = datetime.fromtimestamp(bar.ts / 1e9, tz=timezone.utc).astimezone(NY)
+        local = datetime.fromtimestamp(bar.ts / 1e9, tz=UTC).astimezone(NY)
         # Asia opens 20:00 - attribute evening bars to the next trading date
-        key = (local.date().toordinal() + (1 if local.hour >= 18 else 0))
+        key = local.date().toordinal() + (1 if local.hour >= 18 else 0)
         if key != self.day:
             self.day, self.high, self.low = key, -math.inf, math.inf
         self.high, self.low = max(self.high, bar.h), min(self.low, bar.l)
@@ -133,10 +137,10 @@ class MTFAggregator:
 
     def __init__(self, tfs_seconds: Iterable[int], keep: int = 5000):
         self.tfs = sorted(set(tfs_seconds))
-        self._closed = {tf: deque(maxlen=keep) for tf in self.tfs}
+        self._closed: dict[int, deque] = {tf: deque(maxlen=keep) for tf in self.tfs}
         # forming bar per tf as a mutable list [start, end, o, h, l, c, v]; updated in place
         # (this is the hot path: warm-up feeds hundreds of thousands of bars through it)
-        self._f: dict[int, Optional[list]] = {tf: None for tf in self.tfs}
+        self._f: dict[int, list | None] = {tf: None for tf in self.tfs}
 
     @staticmethod
     def _bucket(ts_ns: int, tf_s: int) -> tuple[int, int]:
@@ -145,7 +149,7 @@ class MTFAggregator:
         if tf_s < 86_400:
             start = ts_ns - ts_ns % tf_ns
             return start, start + tf_ns
-        local = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc).astimezone(NY)
+        local = datetime.fromtimestamp(ts_ns / 1e9, tz=UTC).astimezone(NY)
         day0 = local.replace(hour=18, minute=0, second=0, microsecond=0)
         if local < day0:
             day0 -= _ONE_DAY
@@ -159,7 +163,7 @@ class MTFAggregator:
         ts = b.ts
         for tf in self.tfs:
             f = self._f[tf]
-            if f is not None and ts < f[1]:       # same bucket: update in place
+            if f is not None and ts < f[1]:  # same bucket: update in place
                 if b.h > f[3]:
                     f[3] = b.h
                 if b.l < f[4]:
@@ -167,12 +171,12 @@ class MTFAggregator:
                 f[5] = b.c
                 f[6] += b.v
                 continue
-            if f is not None:                      # bucket rolled: the old bar is now closed
+            if f is not None:  # bucket rolled: the old bar is now closed
                 self._closed[tf].append(Bar(f[0], f[2], f[3], f[4], f[5], f[6], f[1] - f[0]))
             start, end = self._bucket(ts, tf)
             self._f[tf] = [start, end, b.o, b.h, b.l, b.c, b.v]
 
-    def clone(self) -> "MTFAggregator":
+    def clone(self) -> MTFAggregator:
         """
         Independent copy for snapshots. Bars are immutable tuples, so the closed-bar deques are copied
         shallowly (sharing the Bar objects between snapshots); only the mutable forming lists are
@@ -188,12 +192,13 @@ class MTFAggregator:
     def closed(self, tf: int) -> deque[Bar]:
         return self._closed[tf]
 
-    def forming(self, tf: int) -> Optional[Bar]:
+    def forming(self, tf: int) -> Bar | None:
         f = self._f[tf]
         return None if f is None else Bar(f[0], f[2], f[3], f[4], f[5], f[6], f[1] - f[0])
 
 
 from datetime import timedelta  # noqa: E402
+
 _ONE_DAY = timedelta(days=1)
 
 
@@ -212,13 +217,11 @@ class OType(Enum):
 
 
 class OStatus(Enum):
-    PENDING = "pending"   # accepted, waiting out latency
+    PENDING = "pending"  # accepted, waiting out latency
     WORKING = "working"
     FILLED = "filled"
     CANCELLED = "cancelled"
     REJECTED = "rejected"
-
-
 
 
 @dataclass
@@ -226,15 +229,15 @@ class Order:
     side: Side
     qty: int
     otype: OType
-    price: Optional[float] = None
-    sl: Optional[float] = None
-    tp: Optional[float] = None
-    trail_ticks: Optional[int] = None
+    price: float | None = None
+    sl: float | None = None
+    tp: float | None = None
+    trail_ticks: int | None = None
     reduce_only: bool = False
-    id: int = 0               # assigned by Broker.submit (per-account counter => replay-stable)
+    id: int = 0  # assigned by Broker.submit (per-account counter => replay-stable)
     status: OStatus = OStatus.PENDING
-    active_from_ns: int = 0   # latency gate
-    parent_pos: Optional[int] = None
+    active_from_ns: int = 0  # latency gate
+    parent_pos: int | None = None
 
 
 @dataclass
@@ -242,41 +245,47 @@ class Position:
     side: Side
     qty: int
     entry: float
-    sl: Optional[float]
-    tp: Optional[float]
-    trail_ticks: Optional[int]
+    sl: float | None
+    tp: float | None
+    trail_ticks: int | None
     opened_ns: int
-    id: int = 0               # assigned by Broker._apply_fill
-    best: float = 0.0          # best price since entry (for trailing)
-    risk_pts: float = 0.0       # initial |entry-sl|, for R multiples
+    id: int = 0  # assigned by Broker._apply_fill
+    best: float = 0.0  # best price since entry (for trailing)
+    risk_pts: float = 0.0  # initial |entry-sl|, for R multiples
     realized: float = 0.0
 
 
 @dataclass(frozen=True)
 class ExecModel:
-    latency_ms: int = 150             # order -> venue delay, applied on replay clock
-    slippage_ticks_market: int = 1    # adverse, market + stop fills
+    latency_ms: int = 150  # order -> venue delay, applied on replay clock
+    slippage_ticks_market: int = 1  # adverse, market + stop fills
     slippage_ticks_stop: int = 1
-    limit_requires_trade_through: bool = True   # touch isn't enough: price must trade 1 tick through
-    half_spread_ticks: float = 0.0    # NQ futures: quoted from 1-tick spread; use 0 with bars + slippage
-    max_fill_frac_of_volume: float = 1.0        # partial-fill cap vs bar volume
+    limit_requires_trade_through: bool = True  # touch isn't enough: price must trade 1 tick through
+    half_spread_ticks: float = (
+        0.0  # NQ futures: quoted from 1-tick spread; use 0 with bars + slippage
+    )
+    max_fill_frac_of_volume: float = 1.0  # partial-fill cap vs bar volume
 
 
-@dataclass(frozen=True)        # immutable on purpose: Broker.clone() shares trade objects between snapshots
+@dataclass(
+    frozen=True
+)  # immutable on purpose: Broker.clone() shares trade objects between snapshots
 class ClosedTrade:
     side: Side
     qty: int
     entry: float
     exit: float
     pnl: float
-    r_mult: Optional[float]
+    r_mult: float | None
     opened_ns: int
     closed_ns: int
     reason: str
 
 
 class Broker:
-    def __init__(self, inst: Instrument, balance: float = 50_000.0, exec_model: ExecModel = ExecModel()):
+    def __init__(
+        self, inst: Instrument, balance: float = 50_000.0, exec_model: ExecModel = ExecModel()
+    ):
         self.inst, self.x = inst, exec_model
         self.balance = balance
         self.orders: list[Order] = []
@@ -285,13 +294,13 @@ class Broker:
         self.last_price: float = float("nan")
         self._next_id = 1
 
-    def clone(self) -> "Broker":
+    def clone(self) -> Broker:
         """
         Independent copy for snapshots. Orders and positions are mutated in place so they are copied;
         closed trades are frozen, so the list is copied but its (potentially huge) contents are shared.
         copy.deepcopy was O(trades): 88 ms per snapshot/restore at 20,000 closed trades.
         """
-        c = copy.copy(self)         # carries every scalar and any attribute added later
+        c = copy.copy(self)  # carries every scalar and any attribute added later
         c.orders = [copy.copy(o) for o in self.orders]
         c.positions = {k: copy.copy(p) for k, p in self.positions.items()}
         c.trades = list(self.trades)
@@ -318,23 +327,27 @@ class Broker:
             if o.id == order_id and o.status in (OStatus.PENDING, OStatus.WORKING):
                 o.status = OStatus.CANCELLED
 
-    def modify_sl_tp(self, pos_id: int, sl: Optional[float], tp: Optional[float]) -> None:
+    def modify_sl_tp(self, pos_id: int, sl: float | None, tp: float | None) -> None:
         p = self.positions[pos_id]
         p.sl = self.inst.round_px(sl) if sl is not None else None
         p.tp = self.inst.round_px(tp) if tp is not None else None
 
-    def close(self, now: int, pos_id: int, qty: Optional[int] = None) -> None:
+    def close(self, now: int, pos_id: int, qty: int | None = None) -> None:
         """Partial or full close at market on the next bar (same latency/slippage as any market)."""
         p = self.positions[pos_id]
         side = Side.SHORT if p.side == Side.LONG else Side.LONG
-        self.submit(now, Order(side, qty or p.qty, OType.MARKET, reduce_only=True, parent_pos=pos_id))
+        self.submit(
+            now, Order(side, qty or p.qty, OType.MARKET, reduce_only=True, parent_pos=pos_id)
+        )
 
     # ---- account maths ----
     def unrealized(self) -> float:
         if math.isnan(self.last_price):
             return 0.0
-        return sum((self.last_price - p.entry) * p.side.value * p.qty * self.inst.point_value
-                   for p in self.positions.values())
+        return sum(
+            (self.last_price - p.entry) * p.side.value * p.qty * self.inst.point_value
+            for p in self.positions.values()
+        )
 
     def equity(self) -> float:
         return self.balance + self.unrealized()
@@ -345,15 +358,17 @@ class Broker:
     # ---- core: process one base bar ----
     def on_bar(self, bar: Bar) -> None:
         self.last_price = bar.c
-        t = self.inst.tick_size
         # 1) resting protective exits on existing positions (SL first = conservative)
         for p in list(self.positions.values()):
-            self._check_exits(p, bar)          # exits first: a trail moved by this bar's
-            if p.id in self.positions and p.trail_ticks:   # extreme must not stop out this bar
+            self._check_exits(p, bar)  # exits first: a trail moved by this bar's
+            if p.id in self.positions and p.trail_ticks:  # extreme must not stop out this bar
                 self._trail(p, bar)
         # 2) entry / generic orders
         for o in list(self.orders):
-            if o.status not in (OStatus.PENDING, OStatus.WORKING) or bar.close_ts <= o.active_from_ns:
+            if (
+                o.status not in (OStatus.PENDING, OStatus.WORKING)
+                or bar.close_ts <= o.active_from_ns
+            ):
                 continue
             o.status = OStatus.WORKING
             fill = self._try_fill(o, bar)
@@ -361,13 +376,16 @@ class Broker:
                 self._apply_fill(o, fill, bar)
         self.orders = [o for o in self.orders if o.status in (OStatus.PENDING, OStatus.WORKING)]
 
-    def _try_fill(self, o: Order, bar: Bar) -> Optional[float]:
+    def _try_fill(self, o: Order, bar: Bar) -> float | None:
         t, s = self.inst.tick_size, o.side.value
         if o.otype == OType.MARKET:
             # fill at the open of the first bar that closes after the latency gate
             base = bar.o if bar.ts >= o.active_from_ns else bar.c
-            return self.inst.round_px(base + s * (self.x.slippage_ticks_market + self.x.half_spread_ticks) * t)
+            return self.inst.round_px(
+                base + s * (self.x.slippage_ticks_market + self.x.half_spread_ticks) * t
+            )
         if o.otype == OType.LIMIT:
+            assert o.price is not None
             need = t if self.x.limit_requires_trade_through else 0.0
             hit = bar.l <= o.price - need if o.side == Side.LONG else bar.h >= o.price + need
             if not hit:
@@ -376,6 +394,7 @@ class Broker:
             gap = bar.o < o.price if o.side == Side.LONG else bar.o > o.price
             return bar.o if gap else o.price
         if o.otype == OType.STOP:
+            assert o.price is not None
             hit = bar.h >= o.price if o.side == Side.LONG else bar.l <= o.price
             if not hit:
                 return None
@@ -409,19 +428,24 @@ class Broker:
         sl_hit = p.sl is not None and ((bar.l <= p.sl) if s == 1 else (bar.h >= p.sl))
         tp_hit = p.tp is not None and ((bar.h >= p.tp) if s == 1 else (bar.l <= p.tp))
         if sl_hit:  # SL wins ties
+            assert p.sl is not None
             base = min(bar.o, p.sl) if s == 1 else max(bar.o, p.sl)
             px = self.inst.round_px(base - s * self.x.slippage_ticks_stop * self.inst.tick_size)
             self._realize(p, p.qty, px, bar.close_ts, "sl")
         elif tp_hit:
+            assert p.tp is not None
             base = max(bar.o, p.tp) if s == 1 else min(bar.o, p.tp)  # gap-through improves fill
             self._realize(p, p.qty, base, bar.close_ts, "tp")
 
     def _trail(self, p: Position, bar: Bar) -> None:
+        assert p.trail_ticks is not None
         s, d = p.side.value, p.trail_ticks * self.inst.tick_size
         p.best = max(p.best, bar.h) if s == 1 else min(p.best, bar.l)
         new_sl = p.best - s * d
         if p.sl is None or (new_sl > p.sl if s == 1 else new_sl < p.sl):
-            p.sl = self.inst.round_px(new_sl)  # takes effect from the NEXT bar (set after exit check order)
+            p.sl = self.inst.round_px(
+                new_sl
+            )  # takes effect from the NEXT bar (set after exit check order)
 
     def _realize(self, p: Position, qty: int, px: float, ts: int, reason: str) -> None:
         pnl = (px - p.entry) * p.side.value * qty * self.inst.point_value
@@ -448,8 +472,21 @@ class ReplaySession:
     Step-back rebuilds state from a periodic snapshot instead of un-applying fills.
     """
 
-    def __init__(self, bars: list[Bar], inst: Instrument = NQ, tfs=(60, 300, 900, 3600, 86400),
-                 exec_model: ExecModel = ExecModel(), balance=50_000.0, snapshot_every=3600, max_snapshots=24):
+    cursor: int
+    broker: Broker
+    mtf: MTFAggregator
+    asia: SessionRange
+
+    def __init__(
+        self,
+        bars: list[Bar],
+        inst: Instrument = NQ,
+        tfs=(60, 300, 900, 3600, 86400),
+        exec_model: ExecModel = ExecModel(),
+        balance=50_000.0,
+        snapshot_every=3600,
+        max_snapshots=24,
+    ):
         self.bars, self.inst = bars, inst
         self.tfs, self.exec_model, self.balance0 = tfs, exec_model, balance
         self.snapshot_every = snapshot_every
@@ -461,11 +498,13 @@ class ReplaySession:
         self.max_snapshots = max_snapshots
         self.state = Clock.PAUSED
         self.speed = 1.0
-        self.on_bar: list[Callable[[Bar, "ReplaySession"], None]] = []
+        self.on_bar: list[Callable[[Bar, ReplaySession], None]] = []
         self._snaps: dict[int, tuple] = {}
-        self.actions: list[tuple[int, str, tuple]] = []   # (cursor, kind, args) - replayed on step_back
+        self.actions: list[
+            tuple[int, str, tuple]
+        ] = []  # (cursor, kind, args) - replayed on step_back
         self._replaying = False
-        self.floor = 0    # first cursor the user may rewind to (end of warm-up history)
+        self.floor = 0  # first cursor the user may rewind to (end of warm-up history)
         self._reset()
 
     def preload(self, n: int) -> None:
@@ -477,7 +516,7 @@ class ReplaySession:
         if self.cursor or n <= 0:
             raise ValueError("preload must be called once, on a fresh session, with n > 0")
         n = min(n, len(self.bars))
-        asia_from = max(0, n - 130_000)      # ~36h: enough for the current Asian range
+        asia_from = max(0, n - 130_000)  # ~36h: enough for the current Asian range
         for i in range(n):
             b = self.bars[i]
             self.mtf.on_base_bar(b)
@@ -508,7 +547,7 @@ class ReplaySession:
         keep_recent = 3
         while len(self._snaps) > self.max_snapshots:
             ks = sorted(self._snaps)
-            cand = range(1, len(ks) - keep_recent)          # exclude earliest and the newest `keep_recent`
+            cand = range(1, len(ks) - keep_recent)  # exclude earliest and the newest `keep_recent`
             if not cand:
                 return
             victim = min(cand, key=lambda i: ks[i + 1] - ks[i - 1])
@@ -557,14 +596,14 @@ class ReplaySession:
             self.actions.append((self.cursor, "cancel", (order_id,)))
             self.broker.cancel(order_id)
 
-    def modify(self, pos_id: int, sl: Optional[float], tp: Optional[float]) -> None:
+    def modify(self, pos_id: int, sl: float | None, tp: float | None) -> None:
         if not self._replaying:
             if pos_id not in self.broker.positions:
                 raise KeyError(pos_id)
             self.actions.append((self.cursor, "modify", (pos_id, sl, tp)))
             self.broker.modify_sl_tp(pos_id, sl, tp)
 
-    def close(self, pos_id: int, qty: Optional[int] = None) -> None:
+    def close(self, pos_id: int, qty: int | None = None) -> None:
         if not self._replaying:
             if pos_id not in self.broker.positions:
                 raise KeyError(pos_id)
@@ -597,9 +636,13 @@ class ReplaySession:
             b, m, a = self._snaps[snap_at]
             self.broker, self.mtf, self.asia = b.clone(), m.clone(), copy.deepcopy(a)
             keep = snap_at - self.floor
-            if len(self.equity_curve) < keep:                 # invariant: one point per stepped bar (see _snapshot)
-                raise RuntimeError(f"equity curve has {len(self.equity_curve)} points, expected at least {keep}")
-            del self.equity_curve[keep:]                      # the prefix is still valid
+            if (
+                len(self.equity_curve) < keep
+            ):  # invariant: one point per stepped bar (see _snapshot)
+                raise RuntimeError(
+                    f"equity curve has {len(self.equity_curve)} points, expected at least {keep}"
+                )
+            del self.equity_curve[keep:]  # the prefix is still valid
         else:
             self._reset()
         self._replaying = True
@@ -628,6 +671,7 @@ class ReplaySession:
     async def run(self, sleep=None) -> None:
         """Wall-clock-paced playback: wait = bar duration / speed."""
         import asyncio
+
         sleep = sleep or asyncio.sleep
         self.state = Clock.PLAYING
         while self.state is Clock.PLAYING and self.cursor < len(self.bars):
@@ -669,8 +713,9 @@ def stats(session: ReplaySession) -> dict:
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     import random
+
     random.seed(7)
-    start = int(datetime(2025, 3, 10, 13, 0, tzinfo=timezone.utc).timestamp() * 1e9)  # 09:00 NY (EDT)
+    start = int(datetime(2025, 3, 10, 13, 0, tzinfo=UTC).timestamp() * 1e9)  # 09:00 NY (EDT)
     px, bars = 20000.0, []
     for i in range(3 * 3600):  # 3 hours of 1s bars
         o = px
@@ -678,11 +723,16 @@ if __name__ == "__main__":
         bars.append(Bar(start + i * 10**9, o, max(o, px) + 0.25, min(o, px) - 0.25, px, 5, 10**9))
 
     s = ReplaySession(bars, NQ, tfs=(60, 300, 900))
-    entered = []
+    entered: list = []
 
     def strat(b: Bar, ss: ReplaySession):
         c5 = ss.mtf.closed(300)  # closed 5m bars only => no look-ahead
-        if len(c5) >= 3 and not ss.broker.positions and not entered and "NY_AM" in active_sessions(b.ts):
+        if (
+            len(c5) >= 3
+            and not ss.broker.positions
+            and not entered
+            and "NY_AM" in active_sessions(b.ts)
+        ):
             last = c5[-1].c
             ss.submit(Order(Side.LONG, 1, OType.MARKET, sl=last - 10, tp=last + 20))
             entered.append(1)

@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date
 
 import pandas as pd
 import pytest
@@ -10,14 +10,23 @@ from nq_replay import Order, OType, Side
 def frame(start_utc: str, n: int, iid=1, base=20000.0):
     idx = pd.date_range(start_utc, periods=n, freq="s", tz="UTC", name="ts_event")
     px = [base + i * 0.25 for i in range(n)]
-    return pd.DataFrame({"open": px, "high": [p + .5 for p in px], "low": [p - .5 for p in px],
-                         "close": [p + .25 for p in px], "volume": [3] * n, "instrument_id": [iid] * n}, index=idx)
+    return pd.DataFrame(
+        {
+            "open": px,
+            "high": [p + 0.5 for p in px],
+            "low": [p - 0.5 for p in px],
+            "close": [p + 0.25 for p in px],
+            "volume": [3] * n,
+            "instrument_id": [iid] * n,
+        },
+        index=idx,
+    )
 
 
 def test_trading_day_window_est_and_edt():
-    s, e = nd.trading_day_window_utc(date(2025, 3, 5))      # EST: 18:00 NY = 23:00 UTC
+    s, e = nd.trading_day_window_utc(date(2025, 3, 5))  # EST: 18:00 NY = 23:00 UTC
     assert (s.hour, e.hour, s.day) == (23, 22, 4)
-    s, e = nd.trading_day_window_utc(date(2025, 3, 11))     # EDT: 18:00 NY = 22:00 UTC
+    s, e = nd.trading_day_window_utc(date(2025, 3, 11))  # EDT: 18:00 NY = 22:00 UTC
     assert (s.hour, e.hour) == (22, 21)
 
 
@@ -49,7 +58,10 @@ def test_unsorted_input_is_sorted(tmp_path):
 
 
 def test_multi_day_concat_in_order(tmp_path):
-    for d, start in ((date(2025, 3, 11), "2025-03-11 13:30:00"), (date(2025, 3, 10), "2025-03-10 13:30:00")):
+    for d, start in (
+        (date(2025, 3, 11), "2025-03-11 13:30:00"),
+        (date(2025, 3, 10), "2025-03-10 13:30:00"),
+    ):
         nd.write_day(nd.frame_to_table(frame(start, 5)), nd.day_path(tmp_path, "NQ.v.0", d))
     bars = nd.load_bars("NQ.v.0", date(2025, 3, 10), date(2025, 3, 11), tmp_path)
     assert len(bars) == 10 and bars[4].ts < bars[5].ts
@@ -61,20 +73,24 @@ def test_missing_data_raises(tmp_path):
 
 
 def test_back_adjust_at_roll(tmp_path):
-    old = frame("2025-03-10 13:30:00", 5, iid=1, base=20000.0)             # last close 20001.25
-    new = frame("2025-03-10 13:30:05", 5, iid=2, base=20050.0)             # first open 20050 (+48.75 gap)
-    nd.write_day(nd.frame_to_table(pd.concat([old, new])), nd.day_path(tmp_path, "NQ.v.0", date(2025, 3, 10)))
+    old = frame("2025-03-10 13:30:00", 5, iid=1, base=20000.0)  # last close 20001.25
+    new = frame("2025-03-10 13:30:05", 5, iid=2, base=20050.0)  # first open 20050 (+48.75 gap)
+    nd.write_day(
+        nd.frame_to_table(pd.concat([old, new])), nd.day_path(tmp_path, "NQ.v.0", date(2025, 3, 10))
+    )
     raw = nd.load_bars("NQ.v.0", date(2025, 3, 10), date(2025, 3, 10), tmp_path)
     adj = nd.load_bars("NQ.v.0", date(2025, 3, 10), date(2025, 3, 10), tmp_path, back_adjust=True)
-    assert adj[5].o == raw[5].o                       # newest contract untouched
-    assert adj[4].c == adj[5].o                       # roll gap closed
+    assert adj[5].o == raw[5].o  # newest contract untouched
+    assert adj[4].c == adj[5].o  # roll gap closed
     assert adj[0].o == raw[0].o + 48.75
     assert all(a.h >= a.l for a in adj)
 
 
 def test_loaded_bars_drive_replay_end_to_end(tmp_path):
-    nd.write_day(nd.frame_to_table(frame("2025-03-10 13:30:00", 600)),
-                 nd.day_path(tmp_path, "NQ.v.0", date(2025, 3, 10)))
+    nd.write_day(
+        nd.frame_to_table(frame("2025-03-10 13:30:00", 600)),
+        nd.day_path(tmp_path, "NQ.v.0", date(2025, 3, 10)),
+    )
     s = nd.load_session("NQ.v.0", date(2025, 3, 10), date(2025, 3, 10), tmp_path, tfs=(60,))
     s.step(5)
     s.broker.submit(s.now, Order(Side.LONG, 1, OType.MARKET, tp=20010))

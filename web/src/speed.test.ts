@@ -14,21 +14,22 @@ describe("speed model", () => {
     expect(replayRate(0.2, 60)).toBeCloseTo(12);
   });
   it("feasibility follows the server cap", () => {
-    expect(feasible(30, 60)).toBe(true);        // 1,800
-    expect(feasible(30, 900)).toBe(true);       // 27,000
-    expect(feasible(30, 3600)).toBe(false);     // 108,000
-    expect(feasible(2, 14400)).toBe(true);      // 28,800
-    expect(feasible(5, 14400)).toBe(false);     // 72,000
+    expect(feasible(30, 60)).toBe(true); // 1,800
+    expect(feasible(30, 900)).toBe(true); // 27,000
+    expect(feasible(30, 3600)).toBe(false); // 108,000
+    expect(feasible(2, 14400)).toBe(true); // 28,800
+    expect(feasible(5, 14400)).toBe(false); // 72,000
     expect(MAX_REPLAY_RATE).toBe(36_000);
   });
   it("steps down when the timeframe is too big, without losing the preference", () => {
     const pref = 30;
     expect(effectiveCps(pref, 60)).toBe(30);
-    expect(effectiveCps(pref, 14400)).toBe(2);   // stepped down on 4h
-    expect(effectiveCps(pref, 60)).toBe(30);     // preference intact: back on 1m it is restored
+    expect(effectiveCps(pref, 14400)).toBe(2); // stepped down on 4h
+    expect(effectiveCps(pref, 60)).toBe(30); // preference intact: back on 1m it is restored
   });
   it("every timeframe offers at least one feasible speed", () => {
-    for (const tf of [1, 15, 60, 300, 900, 3600, 14400]) expect(feasible(effectiveCps(CPS[0], tf), tf)).toBe(true);
+    for (const tf of [1, 15, 60, 300, 900, 3600, 14400])
+      expect(feasible(effectiveCps(CPS[0], tf), tf)).toBe(true);
     expect(effectiveCps(0.2, 14400)).toBe(0.2);
   });
 });

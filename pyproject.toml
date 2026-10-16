@@ -1,0 +1,20 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+# dense one-liners and long lines are this codebase's style; B008 is FastAPI Depends
+ignore = ["E501", "E702", "E741", "E731", "B905", "B008"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = false
+
+[tool.coverage.run]
+source = ["."]
+omit = ["test_*.py", "web/*"]
+
+[tool.coverage.report]
+fail_under = 80
