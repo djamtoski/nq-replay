@@ -240,36 +240,41 @@ class Journal:
                         "ON CONFLICT(id) DO UPDATE SET meta=excluded.meta",
                         (sid, int(datetime.now().timestamp()), json.dumps(meta)),
                     )
+                existing = {
+                    r["key"]: r
+                    for r in c.execute("SELECT * FROM trades WHERE session_id=?", (sid,))
+                }  # tombstoned (live=2) rows included, so they are never inserted again
+                fresh = [r for r in rows if r[0] not in existing]
+                revive = [
+                    (existing[r[0]]["id"],)
+                    for r in rows
+                    if r[0] in existing and existing[r[0]]["live"] == 0
+                ]
                 c.executemany(
                     "INSERT INTO trades(key, session_id, instrument, point_value, side, qty, entry, exit,"
-                    " pnl, r, opened, closed, reason, mae, mfe, day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
-                    " ON CONFLICT(key) DO UPDATE SET live=CASE WHEN live=0 THEN 1 ELSE live END",
-                    rows,
+                    " pnl, r, opened, closed, reason, mae, mfe, day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    fresh,
                 )
+                c.executemany("UPDATE trades SET live=1 WHERE id=?", revive)
+                written = len(fresh) + len(revive)
                 if full:  # drop or hide whatever the replay no longer contains
                     keep = set(new_keys)
-                    stale = [
-                        (
-                            r["id"],
+                    for key, r in existing.items():
+                        if r["live"] != 1 or key in keep:
+                            continue
+                        if (
                             r["setup"]
                             or r["emotion"]
                             or r["rating"]
                             or r["note"]
-                            or r["mistakes"] != "[]",
-                        )
-                        for r in c.execute(
-                            "SELECT * FROM trades WHERE session_id=? AND live=1", (sid,)
-                        )
-                        if r["key"] not in keep
-                    ]
-                    for tid, has_notes in stale:
-                        if has_notes:
-                            c.execute("UPDATE trades SET live=0 WHERE id=?", (tid,))
+                            or r["mistakes"] != "[]"
+                        ):
+                            c.execute("UPDATE trades SET live=0 WHERE id=?", (r["id"],))
                         else:
-                            c.execute("DELETE FROM trades WHERE id=?", (tid,))
+                            c.execute("DELETE FROM trades WHERE id=?", (r["id"],))
             cache.keys.extend(new_keys)
             self._cache[sid] = cache
-            return len(rows)
+            return written
 
     def update_notes(self, tid: int, raw: dict) -> dict | None:
         fields = clean_notes(raw)
