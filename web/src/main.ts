@@ -72,6 +72,9 @@ const TZ_CHOICES = ["pc", "America/New_York", "UTC"];
 let tzMode: string = store.get("tz", "pc");
 if (!TZ_CHOICES.includes(tzMode)) tzMode = "pc"; // a bad stored value would make Intl throw RangeError
 const zone = () => (tzMode === "pc" ? PC_ZONE : tzMode);
+// Server values go into innerHTML templates; escape them so markup in data can never run.
+const esc = (v: unknown) => String(v).replace(/[&<>"']/g, (c) => "&#" + c.charCodeAt(0) + ";");
+
 const fmtCache = new Map<string, Intl.DateTimeFormat>();
 const tzTime = (t: number, o: Intl.DateTimeFormatOptions) => {
   const key = zone() + JSON.stringify(o);
@@ -296,7 +299,7 @@ function renderPanels(): void {
       ["Max drawdown", s.max_drawdown_usd == null ? "–" : `$${fmt(s.max_drawdown_usd)}`],
     ];
     $("stats").innerHTML = rows
-      .map(([k, v, c]) => `<dt>${k}</dt><dd class="${c ?? ""}">${v}</dd>`)
+      .map(([k, v, c]) => `<dt>${esc(k)}</dt><dd class="${esc(c ?? "")}">${esc(v)}</dd>`)
       .join("");
   }
 
@@ -312,9 +315,9 @@ function renderPanels(): void {
         .map((p) => {
           const dir = p.side === "long" ? 1 : -1;
           const pnl = lp === null ? 0 : (lp - p.entry) * dir * p.qty * pointValue;
-          return `<tr><td class="${p.side === "long" ? "pos" : "neg"}">${p.side}</td><td>${p.qty}</td><td>${fmt(p.entry)}</td>
+          return `<tr><td class="${p.side === "long" ? "pos" : "neg"}">${esc(p.side)}</td><td>${esc(p.qty)}</td><td>${fmt(p.entry)}</td>
       <td>${fmt(p.sl)}</td><td>${fmt(p.tp)}</td><td class="${sideCls(pnl)}">${fmt(pnl)}</td>
-      <td><button data-close="${p.id}">Close</button></td></tr>`;
+      <td><button data-close="${esc(p.id)}">Close</button></td></tr>`;
         })
         .join("")
     : empty(7, "No open positions");
@@ -323,8 +326,8 @@ function renderPanels(): void {
     ? st.orders
         .map(
           (o) =>
-            `<tr><td>${o.otype}</td><td>${o.side === "long" ? "buy" : "sell"}</td><td>${o.qty}</td><td>${fmt(o.price)}</td>
-     <td>${o.status}</td><td><button data-cancel="${o.id}">Cancel</button></td></tr>`,
+            `<tr><td>${esc(o.otype)}</td><td>${o.side === "long" ? "buy" : "sell"}</td><td>${esc(o.qty)}</td><td>${fmt(o.price)}</td>
+     <td>${esc(o.status)}</td><td><button data-cancel="${esc(o.id)}">Cancel</button></td></tr>`,
         )
         .join("")
     : empty(6, "No working orders");
@@ -336,8 +339,8 @@ function renderPanels(): void {
         .map(
           (t) =>
             `<tr><td>${tzTime(t.closed, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })}</td>
-     <td>${t.side}</td><td>${t.qty}</td><td>${fmt(t.entry)}</td><td>${fmt(t.exit)}</td>
-     <td class="${sideCls(t.pnl)}">${fmt(t.pnl)}</td><td>${fmt(t.r)}</td><td>${t.reason}</td></tr>`,
+     <td>${esc(t.side)}</td><td>${esc(t.qty)}</td><td>${fmt(t.entry)}</td><td>${fmt(t.exit)}</td>
+     <td class="${sideCls(t.pnl)}">${fmt(t.pnl)}</td><td>${fmt(t.r)}</td><td>${esc(t.reason)}</td></tr>`,
         )
         .join("")
     : empty(8, "No closed trades yet");
