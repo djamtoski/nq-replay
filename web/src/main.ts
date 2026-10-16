@@ -23,6 +23,7 @@ import {
 import { CPS, cpsLabel, effectiveCps, feasible, replayRate } from "./speed";
 import { DrawingManager } from "./drawings/manager";
 import { createApi } from "./journal/api";
+import { errorMessage } from "./errors";
 import { planReplay, settingsFromRequest } from "./journal/replay";
 import { createJournal } from "./journal/view";
 
@@ -411,20 +412,6 @@ async function newSession(
   request?: Record<string, unknown>,
   seekTo?: number,
 ): Promise<string | null> {
-  ws?.close();
-  ws = null;
-  clearLines();
-  st = initial();
-  replayStart = 0;
-  series.setData([]);
-  times = [];
-  hover = null;
-  renderLegend();
-  scheduleRender();
-  pointValue = cfg.instrument === "MNQ" ? 2 : 20;
-  drawings.load(`drawings:v1:${cfg.source}:${cfg.instrument}`);
-  $("symbol").textContent = `${cfg.instrument} · CME`;
-  setConn("creating session…");
   const body: Record<string, unknown> = request ?? {
     source: cfg.source,
     instrument: cfg.instrument,
@@ -436,6 +423,10 @@ async function newSession(
     body.start = cfg.start;
     body.end = cfg.end;
   }
+  // Ask for the new session first: if it fails (no data for those dates, server down) the replay
+  // that is already on screen must survive untouched.
+  const hadSession = ws !== null;
+  if (!hadSession) setConn("creating session…");
   let sid: string;
   try {
     const r = await fetch(`${API}/sessions`, {
@@ -445,17 +436,28 @@ async function newSession(
     });
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
-      throw new Error(typeof j.detail === "string" ? j.detail : r.statusText);
+      throw new Error(typeof j.detail === "string" ? j.detail : "Couldn't start the session");
     }
     sid = (await r.json()).id;
-    currentSid = sid;
   } catch (e) {
-    const msg = (e as Error).message;
-    setConn(`server error`, "bad");
-    return msg === "Failed to fetch"
-      ? `Can't reach the API at ${API}. Is the server running?`
-      : msg;
+    if (!hadSession) setConn("server error", "bad");
+    return errorMessage(e);
   }
+  // success: now replace the old session
+  ws?.close();
+  ws = null;
+  currentSid = sid;
+  clearLines();
+  st = initial();
+  replayStart = 0;
+  series.setData([]);
+  times = [];
+  hover = null;
+  renderLegend();
+  scheduleRender();
+  pointValue = cfg.instrument === "MNQ" ? 2 : 20;
+  drawings.load(`drawings:v1:${cfg.source}:${cfg.instrument}`);
+  $("symbol").textContent = `${cfg.instrument} · CME`;
   const sock = new WebSocket(`${API.replace(/^http/, "ws")}/ws/${sid}?tf=${tf}`); // server sends only this timeframe's bars
   ws = sock;
   sock.onopen = () => {
@@ -641,8 +643,21 @@ $<HTMLInputElement>("startTime").value = cfgSaved.startTime ?? "09:00";
 $<HTMLInputElement>("balance").value = String(cfgSaved.balance ?? 50000);
 $<HTMLInputElement>("start").value = cfgSaved.start ?? "";
 $<HTMLInputElement>("end").value = cfgSaved.end ?? "";
+const HINTS: Record<string, string> = {
+  synthetic:
+    "Synthetic: 3 trading days of generated 1-second bars. The replay starts on the last day, with the earlier days shown as chart history.",
+  parquet:
+    "The replay starts on the start date at the time above; the 3 trading days before it load as chart history.",
+};
+const syncHint = () => {
+  $("dlgHint").textContent = HINTS[$<HTMLSelectElement>("source").value] ?? "";
+};
 syncReal();
-$("source").onchange = syncReal;
+syncHint();
+$("source").onchange = () => {
+  syncReal();
+  syncHint();
+};
 $("newSession").onclick = () => {
   $("dlgErr").textContent = "";
   dlg.showModal();
@@ -656,7 +671,7 @@ async function replayTrade(id: number): Promise<string | null> {
   try {
     info = await journalApi.replay(id);
   } catch (e) {
-    return (e as Error).message;
+    return errorMessage(e);
   }
   const plan = planReplay(info, currentSid);
   if (plan.kind === "error") return plan.message;

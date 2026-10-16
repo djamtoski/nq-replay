@@ -1,3 +1,4 @@
+import { errorMessage } from "../errors";
 import type { Analytics, CalendarMonth, Filters, JTrade, Notes, ReplayInfo, Tags } from "./types";
 
 export function query(params: Record<string, string | number | undefined | null>): string {
@@ -15,12 +16,12 @@ export function createApi(base: string, f: typeof fetch = (...a) => fetch(...a))
     let r: Response;
     try {
       r = await f(base + path, init);
-    } catch {
-      throw new Error(`Can't reach the API at ${base}. Is the server running?`);
+    } catch (e) {
+      throw new Error(errorMessage(e));
     }
     if (!r.ok) {
       const j = (await r.json().catch(() => ({}))) as { detail?: unknown };
-      throw new Error(typeof j.detail === "string" ? j.detail : r.statusText);
+      throw new Error(typeof j.detail === "string" ? j.detail : "Request failed");
     }
     return (await r.json()) as T;
   }

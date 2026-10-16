@@ -21,7 +21,9 @@ set DATABENTO_API_KEY=...                 # never commit this
 python nq_data.py cost   --start 2025-03-03 --end 2025-03-07
 python nq_data.py ingest --start 2025-03-03 --end 2025-03-07
 ```
-Then choose "Parquet" in the UI.
+Then choose "Real data" in the New session dialog. If the dates you pick aren't downloaded yet it says
+"No data for <start> to <end>" (the folder and symbol are in the server log, not the dialog), and the replay you
+had open stays as it was.
 
 How ingest behaves (all covered by `test_nq_data_databento.py`):
 - Files live under the **full symbol** (`data/bars/NQ.v.0/1s/...`), so `NQ.v.0` and `NQ.c.0` never mix.

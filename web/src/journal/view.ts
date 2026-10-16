@@ -1,5 +1,6 @@
 // Journal dialog: trade log with notes, analytics and a P&L calendar.
 // All DOM is built with createElement/textContent, so trade notes and tags can never inject markup.
+import { errorMessage } from "../errors";
 import type { JournalApi } from "./api";
 import {
   bucketLabel,
@@ -118,7 +119,7 @@ export function createJournal(dlg: HTMLDialogElement, deps: JournalDeps) {
         renderList();
         void loadTags();
       } catch (e) {
-        setStatus(`Not saved: ${(e as Error).message}`, true);
+        setStatus(`Not saved: ${errorMessage(e)}`, true);
       }
     });
     return chain;
@@ -247,7 +248,7 @@ export function createJournal(dlg: HTMLDialogElement, deps: JournalDeps) {
   }
 
   const showError = (e: unknown) => {
-    err.textContent = e ? (e instanceof Error ? e.message : String(e)) : "";
+    err.textContent = e ? errorMessage(e) : "";
   };
 
   // ---- data

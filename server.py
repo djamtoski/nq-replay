@@ -25,7 +25,9 @@ from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 import journal
@@ -507,10 +509,7 @@ class Runtime:
         ss, br = self.ss, self.ss.broker
         if isinstance(c, CmdView):
             if c.tf not in ss.tfs:
-                return {
-                    "type": "error",
-                    "error": f"unknown timeframe {c.tf}; available: {list(ss.tfs)}",
-                }
+                return {"type": "error", "error": "Unknown timeframe"}
             client.tf = c.tf
             await self._send(client, self.view_msg(client))
         elif isinstance(c, CmdPlay):
@@ -537,7 +536,7 @@ class Runtime:
             await self.broadcast_each(self.tick_msg if ss.cursor >= before else self.reset_msg)
         elif isinstance(c, CmdOrder):
             if ss.cursor == 0:
-                return {"type": "error", "error": "step the replay forward before placing orders"}
+                return {"type": "error", "error": "Step the replay forward before placing an order"}
             o = Order(
                 Side.LONG if c.side == "long" else Side.SHORT,
                 c.qty,
@@ -556,12 +555,12 @@ class Runtime:
             await self.broadcast_each(self.tick_msg)
         elif isinstance(c, CmdModify):
             if c.position_id not in br.positions:
-                return {"type": "error", "error": f"no position {c.position_id}"}
+                return {"type": "error", "error": "No such position"}
             ss.modify(c.position_id, c.sl, c.tp)
             await self.broadcast_each(self.tick_msg)
         elif isinstance(c, CmdClose):
             if c.position_id not in br.positions:
-                return {"type": "error", "error": f"no position {c.position_id}"}
+                return {"type": "error", "error": "No such position"}
             ss.close(c.position_id, c.qty)
             await self.broadcast_each(self.tick_msg)
         return None
@@ -573,6 +572,23 @@ app.add_middleware(
     CORSMiddleware, allow_origins=sorted(ALLOWED_ORIGINS), allow_methods=["*"], allow_headers=["*"]
 )
 RUNTIMES: dict[str, Runtime] = {}
+
+
+@app.exception_handler(RequestValidationError)
+async def _invalid_request(_request, exc: RequestValidationError) -> JSONResponse:
+    """FastAPI's default 422 body is a list of internals; the UI wants one plain sentence."""
+    first = exc.errors()[0] if exc.errors() else {}
+    loc = [str(x) for x in first.get("loc", ()) if x not in ("body", "query", "path")]
+    log.info("invalid request: %s", exc.errors())
+    return JSONResponse(
+        {"detail": f"Invalid {loc[-1]}" if loc else "Invalid request"}, status_code=422
+    )
+
+
+def _no_data(req: CreateSession) -> str:
+    """What the user sees when the data they asked for isn't on disk. No paths or symbols: the
+    details go to the server log, the dialog only needs to say which dates came up empty."""
+    return f"No data for {req.start} to {req.end}"
 
 
 def _build(req: CreateSession) -> ReplaySession:
@@ -591,9 +607,9 @@ def _build(req: CreateSession) -> ReplaySession:
             warm = start_index(bars, date(2025, 3, 10), req.start_time)
     else:
         if not (req.start and req.end):
-            raise HTTPException(422, "start and end are required for parquet sessions")
+            raise HTTPException(422, "Pick a start and end date")
         if req.end < req.start:
-            raise HTTPException(422, "end is before start")
+            raise HTTPException(422, "The end date is before the start date")
         import nq_data
 
         try:
@@ -604,12 +620,14 @@ def _build(req: CreateSession) -> ReplaySession:
                 back_adjust=req.back_adjust,
             )
         except FileNotFoundError as e:
-            raise HTTPException(404, str(e)) from e
+            log.warning("no data for %s %s..%s: %s", req.symbol, req.start, req.end, e)
+            raise HTTPException(404, _no_data(req)) from e
         except ValueError as e:  # e.g. a symbol the loader rejects: a client error, not a 500
-            raise HTTPException(422, str(e)) from e
+            log.warning("could not load %s: %s", req.symbol, e)
+            raise HTTPException(422, "Couldn't load that data") from e
         warm = start_index(bars, req.start, req.start_time)
         if warm >= len(bars):
-            raise HTTPException(404, f"no data at or after {req.start} {req.start_time} NY")
+            raise HTTPException(404, _no_data(req))
     ss = ReplaySession(bars, inst, tfs=tuple(req.tfs), exec_model=xm, balance=req.balance)
     if warm:
         ss.preload(warm)
@@ -619,7 +637,7 @@ def _build(req: CreateSession) -> ReplaySession:
 @app.post("/sessions")
 def create_session(req: CreateSession) -> dict:
     if len(RUNTIMES) >= MAX_SESSIONS:
-        raise HTTPException(429, "too many sessions")
+        raise HTTPException(429, "Too many open sessions. Close one first")
     sid = uuid.uuid4().hex[:12]
     ss = _build(req)
     ss.speed = (
@@ -644,7 +662,7 @@ def create_session(req: CreateSession) -> dict:
 def get_session(sid: str) -> dict:
     rt = RUNTIMES.get(sid)
     if not rt:
-        raise HTTPException(404, "unknown session")
+        raise HTTPException(404, "Session not found")
     return {
         "id": sid,
         "cursor": rt.ss.cursor,
@@ -658,7 +676,7 @@ def get_session(sid: str) -> dict:
 async def delete_session(sid: str) -> dict:
     rt = RUNTIMES.pop(sid, None)
     if not rt:
-        raise HTTPException(404, "unknown session")
+        raise HTTPException(404, "Session not found")
     await rt.close()
     rt.sync_journal()
     return {"deleted": sid}
@@ -679,7 +697,7 @@ def _filters(
     session: str | None, start: date | None, end: date | None, setup: str | None, side: str | None
 ) -> dict:
     if side not in (None, "long", "short"):
-        raise HTTPException(422, "side must be long or short")
+        raise HTTPException(422, "Side must be long or short")
     return {
         "session": session,
         "start": start.isoformat() if start else None,
@@ -707,7 +725,7 @@ def journal_trades(
 def journal_trade(tid: int) -> dict:
     t = journal.get().get_trade(tid)
     if not t:
-        raise HTTPException(404, "unknown trade")
+        raise HTTPException(404, "Trade not found")
     return _clean(t)
 
 
@@ -716,16 +734,18 @@ def journal_notes(tid: int, body: NotesBody) -> dict:
     try:
         t = journal.get().update_notes(tid, body.model_dump(exclude_unset=True))
     except ValueError as e:
-        raise HTTPException(422, str(e)) from e
+        raise HTTPException(
+            422, str(e)
+        ) from e  # journal.clean_notes messages are short and user-facing
     if not t:
-        raise HTTPException(404, "unknown trade")
+        raise HTTPException(404, "Trade not found")
     return _clean(t)
 
 
 @app.delete("/journal/trades/{tid}")
 def journal_delete(tid: int) -> dict:
     if not journal.get().delete_trade(tid):
-        raise HTTPException(404, "unknown trade")
+        raise HTTPException(404, "Trade not found")
     return {"deleted": tid}
 
 
@@ -736,7 +756,7 @@ def journal_replay(tid: int) -> dict:
     j = journal.get()
     t = j.get_trade(tid)
     if not t:
-        raise HTTPException(404, "unknown trade")
+        raise HTTPException(404, "Trade not found")
     meta = j.session_meta(t["session_id"]) or {}
     return {
         "trade": tid,
@@ -762,7 +782,7 @@ def journal_analytics(
 @app.get("/journal/calendar")
 def journal_calendar(year: int, month: int) -> dict:
     if not (1970 <= year <= 2200 and 1 <= month <= 12):
-        raise HTTPException(422, "bad year or month")
+        raise HTTPException(422, "Invalid month")
     return _clean(journal.get().calendar(year, month))
 
 
@@ -800,9 +820,8 @@ async def ws(websocket: WebSocket, sid: str, tf: int | None = None) -> None:
             try:
                 c = _cmd.validate_python(raw)
             except ValidationError as e:
-                await websocket.send_json(
-                    {"type": "error", "error": e.errors(include_url=False)[0]["msg"]}
-                )
+                log.info("rejected websocket command: %s", e.errors(include_url=False)[0])
+                await websocket.send_json({"type": "error", "error": "Invalid command"})
                 continue
             err = await rt.handle(c, client)
             if err:
