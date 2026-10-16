@@ -14,6 +14,14 @@ updates:
     groups:
       web:
         patterns: ["*"]
+    ignore:
+      # typescript-eslint does not support TypeScript 7 yet, and ESLint 10 needs a plugin update
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      - dependency-name: eslint
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@eslint/js"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
