@@ -357,3 +357,13 @@ def test_configure_and_get(tmp_path):
     jr.configure(tmp_path / "x" / "y.sqlite")
     assert jr.get().path == tmp_path / "x" / "y.sqlite"
     assert jr.get() is jr.get()
+
+
+def test_full_resync_of_unchanged_trades_keeps_ids_and_writes_nothing(j):
+    a, b = trade(T, T + 60), trade(T + 120, T + 180)
+    j.sync("s", [a, b], META)
+    ids = sorted(r["id"] for r in j.trades())
+    for _ in range(3):  # e.g. repeated seeks in the UI
+        j.invalidate("s")
+        assert j.sync("s", [a, b], META) == 0
+    assert sorted(r["id"] for r in j.trades()) == ids

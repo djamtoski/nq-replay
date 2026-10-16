@@ -22,6 +22,9 @@ import {
 } from "./store";
 import { CPS, cpsLabel, effectiveCps, feasible, replayRate } from "./speed";
 import { DrawingManager } from "./drawings/manager";
+import { createApi } from "./journal/api";
+import { planReplay, settingsFromRequest } from "./journal/replay";
+import { createJournal } from "./journal/view";
 
 const API = (import.meta.env.VITE_API as string | undefined) ?? "http://127.0.0.1:8000";
 const TFS: [number, string][] = [
@@ -57,6 +60,7 @@ const store = {
 
 let st: State = initial();
 let ws: WebSocket | null = null;
+let currentSid = ""; // id of the session this tab is connected to
 let tf: number = store.get("tf", 60);
 if (!TFS.some(([s]) => s === tf)) tf = 60;
 let pointValue = 20;
@@ -400,7 +404,13 @@ interface SessionCfg {
   end?: string;
 }
 
-async function newSession(cfg: SessionCfg): Promise<string | null> {
+/** `request` replaces the body built from `cfg` (used to recreate a journaled trade's session);
+ * `seekTo` (epoch seconds) moves the replay there as soon as the socket opens. */
+async function newSession(
+  cfg: SessionCfg,
+  request?: Record<string, unknown>,
+  seekTo?: number,
+): Promise<string | null> {
   ws?.close();
   ws = null;
   clearLines();
@@ -415,14 +425,14 @@ async function newSession(cfg: SessionCfg): Promise<string | null> {
   drawings.load(`drawings:v1:${cfg.source}:${cfg.instrument}`);
   $("symbol").textContent = `${cfg.instrument} · CME`;
   setConn("creating session…");
-  const body: Record<string, unknown> = {
+  const body: Record<string, unknown> = request ?? {
     source: cfg.source,
     instrument: cfg.instrument,
     start_time: cfg.startTime,
     balance: cfg.balance,
     tfs: TFS.map(([s]) => s),
   };
-  if (cfg.source === "parquet") {
+  if (!request && cfg.source === "parquet") {
     body.start = cfg.start;
     body.end = cfg.end;
   }
@@ -438,6 +448,7 @@ async function newSession(cfg: SessionCfg): Promise<string | null> {
       throw new Error(typeof j.detail === "string" ? j.detail : r.statusText);
     }
     sid = (await r.json()).id;
+    currentSid = sid;
   } catch (e) {
     const msg = (e as Error).message;
     setConn(`server error`, "bad");
@@ -450,6 +461,7 @@ async function newSession(cfg: SessionCfg): Promise<string | null> {
   sock.onopen = () => {
     setConn("connected", "on");
     syncSpeed();
+    if (seekTo !== undefined) send({ cmd: "seek", ts: seekTo });
   };
   sock.onclose = () => {
     if (ws === sock) setConn("disconnected", "bad");
@@ -636,6 +648,37 @@ $("newSession").onclick = () => {
   dlg.showModal();
 };
 $("dlgCancel").onclick = () => dlg.close();
+
+// ---- journal: trade log, notes, analytics, calendar (journal/view.ts)
+const journalApi = createApi(API);
+async function replayTrade(id: number): Promise<string | null> {
+  let info;
+  try {
+    info = await journalApi.replay(id);
+  } catch (e) {
+    return (e as Error).message;
+  }
+  const plan = planReplay(info, currentSid);
+  if (plan.kind === "error") return plan.message;
+  if (plan.kind === "seek") {
+    send({ cmd: "seek", ts: plan.ts });
+    return null;
+  }
+  return newSession(settingsFromRequest(plan.request), plan.request, plan.seekTo);
+}
+const journal = createJournal($<HTMLDialogElement>("journalDlg"), {
+  api: journalApi,
+  fmtTime: (t) =>
+    tzTime(t, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+  onReplay: replayTrade,
+});
+$("journalBtn").onclick = () => void journal.open();
 const readCfg = (): SessionCfg => ({
   source: $<HTMLSelectElement>("source").value,
   instrument: $<HTMLSelectElement>("inst").value,

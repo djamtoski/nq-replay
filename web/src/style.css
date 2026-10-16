@@ -577,3 +577,314 @@ dialog h2 {
     height: 120px;
   }
 }
+
+/* ---- journal ---- */
+dialog.jr {
+  width: min(1180px, 96vw);
+  height: min(780px, 92vh);
+  padding: 0;
+  overflow: hidden;
+}
+dialog.jr[open] {
+  display: flex;
+  flex-direction: column;
+}
+.jr-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.jr-head h2 {
+  margin: 0 8px 0 0;
+}
+.jr-head label {
+  color: var(--muted);
+  font-size: 12px;
+}
+.jr-head input[type="date"] {
+  padding: 3px 6px;
+}
+.jr-err {
+  color: var(--sell);
+  padding: 0 14px;
+  min-height: 0;
+}
+.jr-err:not(:empty) {
+  padding: 6px 14px;
+}
+.jr-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+}
+.jr-body .empty,
+.jr-list .empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 40px 12px;
+}
+.jr-trades {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr);
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+}
+.jr-list {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.jr-list table,
+.jr-breakdowns table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.jr-list th,
+.jr-breakdowns th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 6px 8px;
+}
+.jr-list td,
+.jr-breakdowns td {
+  padding: 5px 8px;
+  border-top: 1px solid var(--line);
+  white-space: nowrap;
+}
+.jr-list tbody tr {
+  cursor: pointer;
+}
+.jr-list tbody tr:hover,
+.jr-list tbody tr.sel {
+  background: var(--hover);
+}
+.jr-list tbody tr.sel {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.jr-detail {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.jr-detail h3 {
+  margin: 0;
+  display: flex;
+  justify-content: space-between;
+}
+.jr-facts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 14px;
+}
+.jr-facts div,
+.card2 {
+  display: flex;
+  flex-direction: column;
+}
+.jr-facts small,
+.card2 small,
+.jr-field small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.jr-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.jr-form label,
+.jr-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.jr-field input,
+.jr-form input {
+  color: var(--text);
+}
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.jr-stars button {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  font-size: 20px;
+  color: var(--line);
+}
+.jr-stars button.on {
+  color: var(--asia);
+}
+.jr-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--hover);
+  border-radius: 10px;
+  padding: 1px 4px 1px 9px;
+  color: var(--text);
+}
+.chip button {
+  border: none;
+  background: none;
+  padding: 0 4px;
+  line-height: 1;
+}
+.jr-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.jr-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+.jr-status.bad {
+  color: var(--sell);
+}
+button.danger {
+  color: var(--sell);
+}
+.jr-analytics {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.jr-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+.card2 {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.card2 b {
+  font-size: 16px;
+}
+.card2.wide {
+  padding: 10px 12px;
+}
+.card2 h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.jr-equity {
+  width: 100%;
+  height: 180px;
+}
+.jr-equity .zero {
+  stroke: var(--line);
+  stroke-dasharray: 3 3;
+}
+.jr-equity .curve {
+  stroke: var(--accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.jr-breakdowns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 12px;
+}
+.barcell {
+  width: 30%;
+}
+.bar {
+  display: block;
+  height: 8px;
+  border-radius: 2px;
+}
+.bar.pos {
+  background: var(--buy);
+}
+.bar.neg {
+  background: var(--sell);
+}
+.jr-calhead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.jr-calhead h3 {
+  margin: 0;
+  min-width: 150px;
+  text-align: center;
+}
+.calgrid {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 4px;
+  table-layout: fixed;
+}
+.calgrid th {
+  color: var(--muted);
+  font-weight: 500;
+}
+.calgrid td {
+  height: 84px;
+  vertical-align: top;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+.calgrid td.blank {
+  border: none;
+}
+.calgrid td.has {
+  cursor: pointer;
+}
+.calgrid td.has:hover {
+  outline: 2px solid var(--accent);
+}
+.calgrid td .n {
+  color: var(--muted);
+  font-size: 11px;
+}
+.calgrid td b,
+.calgrid td small {
+  display: block;
+}
+@media (max-width: 900px) {
+  .jr-trades {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+}
+
+.calgrid td.has .n {
+  color: var(--text);
+  opacity: 0.85;
+}

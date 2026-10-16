@@ -80,6 +80,19 @@ Click-click or press-drag to draw; click a drawing to select, drag its body or h
 timeframes and can sit in the empty space right of "now". They persist per data source + contract in
 `localStorage` (`drawings:v1:<source>:<instrument>`). This is a core set, not all of TradingView's tools.
 
+## Trade journal (UI)
+The **Journal** button in the header opens a full-screen journal with three tabs and shared filters
+(date range, setup, side):
+- **Trades**: every closed trade, newest first. Select one to see entry/exit, hold time, R, exit reason and
+  MAE/MFE in dollars, then add a setup, an emotion, a 1-5 rating, mistake tags and free-text notes (tags
+  autocomplete from what you used before). Edits save automatically; **Replay this trade** jumps the chart to
+  10 minutes before the entry (reusing the live session, or recreating the stored one); **Delete** removes it.
+- **Analytics**: net P&L, win rate, profit factor, expectancy, avg R, drawdown, hold time, avg MAE/MFE, a
+  cumulative P&L curve, and tables by setup, mistake, emotion, entry hour (New York), weekday, side and exit.
+- **Calendar**: a month grid of daily P&L (green/red, shaded by size); click a day to list its trades.
+
+Not built yet: chart screenshots attached to trades.
+
 ## Trade journal (backend)
 Every closed trade of every session is mirrored into a local SQLite file, `data/journal.sqlite`
 (override with `NQ_JOURNAL=path`; git-ignored). Nothing leaves your machine. Trades are keyed by content, so
