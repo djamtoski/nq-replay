@@ -31,7 +31,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 import journal
-from nq_data import SYMBOL_MAX, SYMBOL_PATTERN
+from nq_data import SYMBOL_MAX, SYMBOL_PATTERN, trading_days
 from nq_replay import (
     MNQ,
     NQ,
@@ -62,6 +62,8 @@ S = 10**9
 NY = ZoneInfo("America/New_York")
 log = logging.getLogger("replay")
 DEFAULT_TFS = [1, 15, 60, 300, 900, 3600, 14400]
+SYNTH_FIRST, SYNTH_LAST = date(2025, 3, 3), date(2025, 3, 7)  # the default demo range
+SYNTH_MAX_DAYS = 10  # about 83k bars (and ~8 MB) per day
 
 
 # --------------------------------------------------------------------------- data sources
@@ -80,17 +82,17 @@ def synthetic_bars(
     return out
 
 
-@lru_cache(maxsize=2)
-def synthetic_days(seed: int = 1) -> list[Bar]:
+@lru_cache(maxsize=1)
+def synthetic_days(first: date = SYNTH_FIRST, last: date = SYNTH_LAST, seed: int = 1) -> list[Bar]:
     """
-    Three CME trading days of 1s bars (Thu 2025-03-06, Fri 03-07, Mon 03-10), 18:00 -> 17:00 NY each.
+    1s bars for every Mon-Fri CME trading day in [first, last], 18:00 prior evening -> 17:00 NY each.
     Volatility follows a rough intraday profile (quiet Asia, busier London, loud NY open).
     Cached and shared read-only across sessions.
     """
     rnd = random.Random(seed)
     out: list[Bar] = []
     px = 20000.0
-    for d in (date(2025, 3, 6), date(2025, 3, 7), date(2025, 3, 10)):
+    for d in trading_days(first, last):
         start = datetime.combine(d - timedelta(days=1), time(18), tzinfo=NY).astimezone(UTC)
         end = datetime.combine(d, time(17), tzinfo=NY).astimezone(UTC)
         t = int(start.timestamp())
@@ -163,7 +165,7 @@ class CreateSession(BaseModel):
     start_time: str = Field(
         "09:00", pattern=r"^\d{2}:\d{2}$"
     )  # New York wall clock of the replay start
-    warmup_days: int = Field(3, ge=0, le=10)  # parquet: history loaded before `start`
+    warmup_days: int = Field(3, ge=0, le=10)  # trading days of chart history loaded before `start`
     tfs: list[int] = DEFAULT_TFS
     latency_ms: int = Field(150, ge=0, le=10_000)
     slippage_ticks: int = Field(1, ge=0, le=50)
@@ -585,6 +587,15 @@ async def _invalid_request(_request, exc: RequestValidationError) -> JSONRespons
     )
 
 
+def _back(d: date, n: int) -> date:
+    """The date n trading days before d (history loaded ahead of the replay start)."""
+    while n > 0:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:
+            n -= 1
+    return d
+
+
 def _no_data(req: CreateSession) -> str:
     """What the user sees when the data they asked for isn't on disk. No paths or symbols: the
     details go to the server log, the dialog only needs to say which dates came up empty."""
@@ -603,8 +614,15 @@ def _build(req: CreateSession) -> ReplaySession:
         if req.bars:  # test/demo mode: short series from bar 0
             bars = synthetic_bars(req.bars)
         else:
-            bars = synthetic_days()
-            warm = start_index(bars, date(2025, 3, 10), req.start_time)
+            first, last = req.start or SYNTH_FIRST, req.end or SYNTH_LAST
+            if last < first:
+                raise HTTPException(422, "The end date is before the start date")
+            if len(list(trading_days(first, last))) > SYNTH_MAX_DAYS:
+                raise HTTPException(
+                    422, f"Synthetic data is limited to {SYNTH_MAX_DAYS} trading days"
+                )
+            bars = synthetic_days(_back(first, req.warmup_days), last)
+            warm = start_index(bars, first, req.start_time)
     else:
         if not (req.start and req.end):
             raise HTTPException(422, "Pick a start and end date")
@@ -617,6 +635,7 @@ def _build(req: CreateSession) -> ReplaySession:
                 req.symbol,
                 req.start - timedelta(days=req.warmup_days * 7 // 5 + 3),
                 req.end,
+                root=nq_data.DEFAULT_ROOT,  # read at call time so tests (and a moved data folder) apply
                 back_adjust=req.back_adjust,
             )
         except FileNotFoundError as e:
@@ -632,6 +651,21 @@ def _build(req: CreateSession) -> ReplaySession:
     if warm:
         ss.preload(warm)
     return ss
+
+
+DATASET_LABELS = {"USATECH.IDX": "Nasdaq 100 CFD (Dukascopy)"}
+
+
+@app.get("/datasets")
+def datasets() -> dict:
+    """Downloaded real-data sets (from file names only, nothing is read), so the UI can offer
+    exactly the dates that exist."""
+    import nq_data
+
+    out = nq_data.list_datasets(nq_data.DEFAULT_ROOT)
+    for d in out:
+        d["label"] = DATASET_LABELS.get(d["symbol"], f"{d['symbol']} (Databento)")
+    return {"datasets": out}
 
 
 @app.post("/sessions")

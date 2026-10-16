@@ -24,6 +24,14 @@ import { CPS, cpsLabel, effectiveCps, feasible, replayRate } from "./speed";
 import { DrawingManager } from "./drawings/manager";
 import { createApi } from "./journal/api";
 import { errorMessage } from "./errors";
+import {
+  clampToDataset,
+  realHint,
+  SYNTH_DEFAULT,
+  synthHint,
+  validate,
+  type Dataset,
+} from "./sessionDialog";
 import { planReplay, settingsFromRequest } from "./journal/replay";
 import { createJournal } from "./journal/view";
 
@@ -398,6 +406,7 @@ function onMessage(raw: string): void {
 
 interface SessionCfg {
   source: string;
+  symbol?: string; // real data: the dataset folder (NQ.v.0, USATECH.IDX, ...)
   instrument: string;
   startTime: string;
   balance: number;
@@ -419,9 +428,10 @@ async function newSession(
     balance: cfg.balance,
     tfs: TFS.map(([s]) => s),
   };
-  if (!request && cfg.source === "parquet") {
-    body.start = cfg.start;
-    body.end = cfg.end;
+  if (!request) {
+    if (cfg.source === "parquet") body.symbol = cfg.symbol;
+    if (cfg.start) body.start = cfg.start;
+    if (cfg.end) body.end = cfg.end;
   }
   // Ask for the new session first: if it fails (no data for those dates, server down) the replay
   // that is already on screen must survive untouched.
@@ -456,8 +466,12 @@ async function newSession(
   renderLegend();
   scheduleRender();
   pointValue = cfg.instrument === "MNQ" ? 2 : 20;
-  drawings.load(`drawings:v1:${cfg.source}:${cfg.instrument}`);
-  $("symbol").textContent = `${cfg.instrument} · CME`;
+  // drawings belong to one price series: a Databento NQ chart and the Nasdaq 100 CFD must not share them
+  drawings.load(
+    `drawings:v1:${cfg.source === "parquet" ? cfg.symbol : "synthetic"}:${cfg.instrument}`,
+  );
+  $("symbol").textContent =
+    `${cfg.instrument} · ${cfg.symbol?.startsWith("USATECH") ? "US100 CFD" : "CME"}`;
   const sock = new WebSocket(`${API.replace(/^http/, "ws")}/ws/${sid}?tf=${tf}`); // server sends only this timeframe's bars
   ws = sock;
   sock.onopen = () => {
@@ -633,34 +647,74 @@ document.addEventListener("keydown", (e) => {
 // session dialog
 const dlg = $<HTMLDialogElement>("sessionDlg");
 const cfgSaved = store.get<Partial<SessionCfg>>("cfg", {});
-const syncReal = () =>
-  document.querySelectorAll<HTMLElement>(".real").forEach((el) => {
-    el.hidden = $<HTMLSelectElement>("source").value !== "parquet";
-  });
-$<HTMLSelectElement>("source").value = cfgSaved.source ?? "synthetic";
-$<HTMLSelectElement>("inst").value = cfgSaved.instrument ?? "NQ";
-$<HTMLInputElement>("startTime").value = cfgSaved.startTime ?? "09:00";
-$<HTMLInputElement>("balance").value = String(cfgSaved.balance ?? 50000);
-$<HTMLInputElement>("start").value = cfgSaved.start ?? "";
-$<HTMLInputElement>("end").value = cfgSaved.end ?? "";
-const HINTS: Record<string, string> = {
-  synthetic:
-    "Synthetic: 3 trading days of generated 1-second bars. The replay starts on the last day, with the earlier days shown as chart history.",
-  parquet:
-    "The replay starts on the start date at the time above; the 3 trading days before it load as chart history.",
+const sel = (id: string) => $<HTMLSelectElement>(id);
+const inp = (id: string) => $<HTMLInputElement>(id);
+let datasets: Dataset[] = [];
+const dataset = () => datasets.find((d) => d.symbol === sel("dataset").value);
+const isReal = () => sel("source").value === "parquet";
+
+sel("source").value = cfgSaved.source ?? "synthetic";
+sel("inst").value = cfgSaved.instrument ?? "NQ";
+inp("startTime").value = cfgSaved.startTime ?? "09:00";
+inp("balance").value = String(cfgSaved.balance ?? 50000);
+inp("start").value = cfgSaved.start || SYNTH_DEFAULT.start;
+inp("end").value = cfgSaved.end || SYNTH_DEFAULT.end;
+
+/** Show only what applies to the chosen source, limit the date pickers to the data that exists. */
+function syncDialog(): void {
+  const real = isReal();
+  document.querySelectorAll<HTMLElement>(".real").forEach((el) => (el.hidden = !real));
+  const d = real ? dataset() : undefined;
+  for (const id of ["start", "end"]) {
+    inp(id).min = d?.first ?? "";
+    inp(id).max = d?.last ?? "";
+  }
+  $("dlgHint").textContent = real ? realHint(d, datasets.length) : synthHint();
+}
+/** After the source or dataset changes, move the dates somewhere that makes sense for it. */
+function resetDates(): void {
+  const d = dataset();
+  const r = isReal()
+    ? d
+      ? clampToDataset(inp("start").value, inp("end").value, d)
+      : { start: "", end: "" }
+    : SYNTH_DEFAULT;
+  inp("start").value = r.start;
+  inp("end").value = r.end;
+}
+async function loadDatasets(): Promise<void> {
+  try {
+    const r = await fetch(`${API}/datasets`);
+    datasets = r.ok ? ((await r.json()) as { datasets: Dataset[] }).datasets : [];
+  } catch {
+    datasets = [];
+  }
+  const keep = sel("dataset").value || cfgSaved.symbol;
+  sel("dataset").replaceChildren(
+    ...datasets.map((d) => {
+      const o = document.createElement("option");
+      o.value = d.symbol;
+      o.textContent = d.label;
+      return o;
+    }),
+  );
+  if (keep && datasets.some((d) => d.symbol === keep)) sel("dataset").value = keep;
+  syncDialog();
+}
+syncDialog();
+sel("source").onchange = () => {
+  syncDialog();
+  resetDates();
+  syncDialog();
 };
-const syncHint = () => {
-  $("dlgHint").textContent = HINTS[$<HTMLSelectElement>("source").value] ?? "";
-};
-syncReal();
-syncHint();
-$("source").onchange = () => {
-  syncReal();
-  syncHint();
+sel("dataset").onchange = () => {
+  resetDates();
+  syncDialog();
 };
 $("newSession").onclick = () => {
   $("dlgErr").textContent = "";
   dlg.showModal();
+  void loadDatasets(); // pick up files downloaded since the page was opened
 };
 $("dlgCancel").onclick = () => dlg.close();
 
@@ -695,18 +749,20 @@ const journal = createJournal($<HTMLDialogElement>("journalDlg"), {
 });
 $("journalBtn").onclick = () => void journal.open();
 const readCfg = (): SessionCfg => ({
-  source: $<HTMLSelectElement>("source").value,
-  instrument: $<HTMLSelectElement>("inst").value,
-  startTime: $<HTMLInputElement>("startTime").value || "09:00",
-  balance: Number($<HTMLInputElement>("balance").value) || 50000,
-  start: $<HTMLInputElement>("start").value,
-  end: $<HTMLInputElement>("end").value,
+  source: sel("source").value,
+  symbol: sel("dataset").value || cfgSaved.symbol || "NQ.v.0",
+  instrument: sel("inst").value,
+  startTime: inp("startTime").value || "09:00",
+  balance: Number(inp("balance").value) || 50000,
+  start: inp("start").value,
+  end: inp("end").value,
 });
 $("sessionForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const cfg = readCfg();
-  if (cfg.source === "parquet" && (!cfg.start || !cfg.end)) {
-    $("dlgErr").textContent = "Pick a start and end date for real data.";
+  const bad = validate(cfg.source, cfg.start ?? "", cfg.end ?? "", dataset());
+  if (bad) {
+    $("dlgErr").textContent = bad;
     return;
   }
   const err = await newSession(cfg);

@@ -299,10 +299,59 @@ def load_session(
     return ReplaySession(load_bars(symbol, start, end, root, back_adjust), inst, **session_kw)
 
 
+def list_datasets(root: Path = DEFAULT_ROOT) -> list[dict]:
+    """[{symbol, first, last, days}] for every symbol folder holding daily files; reads names only."""
+    out = []
+    for sym in sorted(p for p in Path(root).glob("*") if (p / "1s").is_dir()):
+        if not SYMBOL_RE.fullmatch(sym.name):
+            continue
+        days = []
+        for f in (sym / "1s").glob("*/*.parquet"):
+            try:
+                days.append(date.fromisoformat(f.stem))
+            except ValueError:
+                continue
+        if days:
+            out.append(
+                {
+                    "symbol": sym.name,
+                    "first": min(days).isoformat(),
+                    "last": max(days).isoformat(),
+                    "days": len(days),
+                }
+            )
+    return out
+
+
 def info(root: Path = DEFAULT_ROOT) -> None:
     for f in sorted(Path(root).glob("*/1s/*/*.parquet")):
         m = pq.read_metadata(f)
         print(f"{f.relative_to(root)}  rows={m.num_rows:,}  {f.stat().st_size / 1e6:.2f} MB")
+
+
+def _dukascopy(a) -> None:
+    """Free Nasdaq 100 index CFD ticks -> the same daily 1s Parquet files (see dukascopy.py)."""
+    import dukascopy
+
+    todo, have, mb = dukascopy.estimate(a.start, a.end, a.root, a.force)
+    print(f"{todo} trading day(s) to download, {have} already on disk")
+    if not todo:
+        return print("nothing to download")
+    print(
+        f"Free, but about {mb:,.0f} MB of downloads (roughly 3 MB per day). Data: Dukascopy US100 index CFD."
+    )
+    if not a.yes:
+        try:
+            answer = input("Proceed? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() != "y":
+            return print("aborted")
+    try:
+        n = dukascopy.ingest(a.start, a.end, a.root, a.force)
+    except ConnectionError as e:
+        sys.exit(f"{e}\nDays already downloaded are kept; re-run to resume.")
+    print(f"done: {n} day(s) written under {dukascopy.SYMBOL}")
 
 
 def _d(s: str) -> date:
@@ -313,7 +362,7 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("cmd", choices=["cost", "ingest", "info"])
+    ap.add_argument("cmd", choices=["cost", "ingest", "info", "dukascopy"])
     ap.add_argument("--symbol", default="NQ.v.0")
     ap.add_argument("--start", type=_d)
     ap.add_argument("--end", type=_d)
@@ -331,6 +380,8 @@ def main(argv=None) -> None:
         return info(a.root)
     if not (a.start and a.end):
         ap.error("--start and --end are required")
+    if a.cmd == "dukascopy":
+        return _dukascopy(a)
     try:
         check_symbol(a.symbol)
     except ValueError as e:
