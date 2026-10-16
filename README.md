@@ -67,7 +67,7 @@ cd web && npm test && npx tsc --noEmit
 CI runs the checks below on every PR (plus dependency audits, CodeQL and weekly Dependabot updates):
 ```bash
 pip install -r requirements-dev.txt
-ruff check . && ruff format --check . && mypy nq_replay.py nq_data.py server.py
+ruff check . && ruff format --check . && mypy nq_replay.py nq_data.py server.py journal.py
 python -m pytest -q --cov                # fails under 80% coverage (pyproject.toml)
 cd web && npm run lint && npm run format:check && npm run coverage   # coverage thresholds in vitest.config.ts
 ```
@@ -79,6 +79,24 @@ Click-click or press-drag to draw; click a drawing to select, drag its body or h
 `Ctrl+Z` undoes, `Esc` cancels. Drawings are stored in time/price (not bar index), so they stay put across
 timeframes and can sit in the empty space right of "now". They persist per data source + contract in
 `localStorage` (`drawings:v1:<source>:<instrument>`). This is a core set, not all of TradingView's tools.
+
+## Trade journal (backend)
+Every closed trade of every session is mirrored into a local SQLite file, `data/journal.sqlite`
+(override with `NQ_JOURNAL=path`; git-ignored). Nothing leaves your machine. Trades are keyed by content, so
+stepping back removes trades that no longer exist in the replay, except ones you wrote notes on: those are
+hidden and return if you replay the same moves. Deleting a trade in the journal is permanent.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /journal/trades` | list, newest first. Filters: `session`, `start`, `end` (trading day), `setup`, `side`; `limit`, `offset` |
+| `GET/PATCH/DELETE /journal/trades/{id}` | one trade; PATCH takes `setup`, `emotion`, `rating` (1-5), `mistakes` (tags), `note` |
+| `GET /journal/trades/{id}/replay` | the session request + entry time, to jump to the trade (reuse the live session or recreate it) |
+| `GET /journal/analytics` | summary (win rate, profit factor, expectancy, avg R, drawdown, MAE/MFE), equity curve, breakdowns by hour / weekday / side / setup / emotion / mistake / exit reason |
+| `GET /journal/calendar?year=&month=` | per-trading-day P&L, trades and green/red day counts |
+| `GET /journal/tags` | tags already used, for autocomplete |
+
+Days are CME trading days (the 18:00 New York open belongs to the next day). MAE/MFE are in points and bar-level:
+a bar's high/low while the position was open, since the order of high and low inside a 1-second bar is unknown.
 
 ## Rules to keep replays correct
 * Orders/cancels/modifies/closes go through `ReplaySession.submit/cancel/modify/close`, never `session.broker.*`,

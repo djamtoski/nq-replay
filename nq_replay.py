@@ -253,6 +253,8 @@ class Position:
     best: float = 0.0  # best price since entry (for trailing)
     risk_pts: float = 0.0  # initial |entry-sl|, for R multiples
     realized: float = 0.0
+    mae: float = 0.0  # worst excursion against the entry so far, in points (>= 0)
+    mfe: float = 0.0  # best excursion in favour of the entry so far, in points (>= 0)
 
 
 @dataclass(frozen=True)
@@ -280,6 +282,8 @@ class ClosedTrade:
     opened_ns: int
     closed_ns: int
     reason: str
+    mae: float = 0.0  # points; bar-level (a bar's high/low, order within the bar unknown)
+    mfe: float = 0.0
 
 
 class Broker:
@@ -358,6 +362,12 @@ class Broker:
     # ---- core: process one base bar ----
     def on_bar(self, bar: Bar) -> None:
         self.last_price = bar.c
+        for p in (
+            self.positions.values()
+        ):  # excursions, incl. the bar that exits (opened on an earlier bar)
+            up, down = bar.h - p.entry, p.entry - bar.l
+            fav, adv = (up, down) if p.side.value == 1 else (down, up)
+            p.mfe, p.mae = max(p.mfe, fav), max(p.mae, adv)
         # 1) resting protective exits on existing positions (SL first = conservative)
         for p in list(self.positions.values()):
             self._check_exits(p, bar)  # exits first: a trail moved by this bar's
@@ -451,7 +461,9 @@ class Broker:
         pnl = (px - p.entry) * p.side.value * qty * self.inst.point_value
         self.balance += pnl - (self.inst.commission_per_side * qty if reason in ("sl", "tp") else 0)
         r = (pnl / (p.risk_pts * self.inst.point_value * qty)) if p.risk_pts else None
-        self.trades.append(ClosedTrade(p.side, qty, p.entry, px, pnl, r, p.opened_ns, ts, reason))
+        self.trades.append(
+            ClosedTrade(p.side, qty, p.entry, px, pnl, r, p.opened_ns, ts, reason, p.mae, p.mfe)
+        )
         p.qty -= qty
         if p.qty == 0:
             self.positions.pop(p.id, None)

@@ -24,10 +24,11 @@ from functools import lru_cache
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
+import journal
 from nq_data import SYMBOL_MAX, SYMBOL_PATTERN
 from nq_replay import (
     MNQ,
@@ -315,10 +316,18 @@ class Client:
 
 
 class Runtime:
-    def __init__(self, sid: str, ss: ReplaySession):
+    def __init__(self, sid: str, ss: ReplaySession, meta: dict | None = None):
         self.id, self.ss = sid, ss
+        self.meta = meta or {"instrument": "NQ", "point_value": ss.inst.point_value}
         self.clients: dict[WebSocket, Client] = {}
         self.task: asyncio.Task | None = None
+
+    def sync_journal(self) -> None:
+        """Mirror closed trades into the local journal. Never lets a journal problem stop a replay."""
+        try:
+            journal.get().sync(self.id, self.ss.broker.trades, self.meta)
+        except Exception:
+            log.exception("journal sync failed for session %s", self.id)
 
     # ---- messages
     def account(self) -> dict:
@@ -455,6 +464,7 @@ class Runtime:
                 continue
             acc = 0.0 if n == MAX_BARS_PER_FRAME else acc - n
             ss.step(n)
+            self.sync_journal()
             await self.broadcast_each(self.tick_msg)
         if ss.cursor >= len(ss.bars):
             ss.state = Clock.PAUSED
@@ -481,6 +491,19 @@ class Runtime:
 
     # ---- commands
     async def handle(self, c, client: Client) -> dict | None:
+        if isinstance(c, (CmdStepBack, CmdSeek)):
+            try:
+                journal.get().invalidate(
+                    self.id
+                )  # the replay may move backwards: rewrite on next sync
+            except Exception:
+                log.exception("journal invalidate failed")
+        try:
+            return await self._handle(c, client)
+        finally:
+            self.sync_journal()
+
+    async def _handle(self, c, client: Client) -> dict | None:
         ss, br = self.ss, self.ss.broker
         if isinstance(c, CmdView):
             if c.tf not in ss.tfs:
@@ -602,7 +625,12 @@ def create_session(req: CreateSession) -> dict:
     ss.speed = (
         60.0  # initial only (replay-seconds per real second); the UI sends its own on connect
     )
-    RUNTIMES[sid] = Runtime(sid, ss)
+    meta = {
+        "instrument": req.instrument,
+        "point_value": ss.inst.point_value,
+        "request": req.model_dump(mode="json"),
+    }
+    RUNTIMES[sid] = Runtime(sid, ss, meta)
     return {
         "id": sid,
         "bars": len(ss.bars),
@@ -632,7 +660,115 @@ async def delete_session(sid: str) -> dict:
     if not rt:
         raise HTTPException(404, "unknown session")
     await rt.close()
+    rt.sync_journal()
     return {"deleted": sid}
+
+
+# --------------------------------------------------------------------------- journal
+class NotesBody(BaseModel):
+    """Editable journal fields; only the ones sent are changed."""
+
+    setup: str | None = None
+    emotion: str | None = None
+    rating: int | None = None
+    mistakes: list[str] | None = None
+    note: str | None = None
+
+
+def _filters(
+    session: str | None, start: date | None, end: date | None, setup: str | None, side: str | None
+) -> dict:
+    if side not in (None, "long", "short"):
+        raise HTTPException(422, "side must be long or short")
+    return {
+        "session": session,
+        "start": start.isoformat() if start else None,
+        "end": end.isoformat() if end else None,
+        "setup": setup,
+        "side": side,
+    }
+
+
+@app.get("/journal/trades")
+def journal_trades(
+    session: str | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    setup: str | None = None,
+    side: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=5000)] = 500,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict:
+    f = _filters(session, start, end, setup, side)
+    return {"trades": _clean(journal.get().trades(f, limit, offset))}
+
+
+@app.get("/journal/trades/{tid}")
+def journal_trade(tid: int) -> dict:
+    t = journal.get().get_trade(tid)
+    if not t:
+        raise HTTPException(404, "unknown trade")
+    return _clean(t)
+
+
+@app.patch("/journal/trades/{tid}")
+def journal_notes(tid: int, body: NotesBody) -> dict:
+    try:
+        t = journal.get().update_notes(tid, body.model_dump(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    if not t:
+        raise HTTPException(404, "unknown trade")
+    return _clean(t)
+
+
+@app.delete("/journal/trades/{tid}")
+def journal_delete(tid: int) -> dict:
+    if not journal.get().delete_trade(tid):
+        raise HTTPException(404, "unknown trade")
+    return {"deleted": tid}
+
+
+@app.get("/journal/trades/{tid}/replay")
+def journal_replay(tid: int) -> dict:
+    """What the UI needs to jump to a trade: the session it came from and when it opened.
+    `request` is null when the trade's session is unknown, and then the trade can only be viewed."""
+    j = journal.get()
+    t = j.get_trade(tid)
+    if not t:
+        raise HTTPException(404, "unknown trade")
+    meta = j.session_meta(t["session_id"]) or {}
+    return {
+        "trade": tid,
+        "session_id": t["session_id"],
+        "live": t["session_id"] in RUNTIMES,
+        "request": meta.get("request"),
+        "opened": t["opened"],
+        "closed": t["closed"],
+    }
+
+
+@app.get("/journal/analytics")
+def journal_analytics(
+    session: str | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    setup: str | None = None,
+    side: str | None = None,
+) -> dict:
+    return _clean(journal.get().analytics(_filters(session, start, end, setup, side)))
+
+
+@app.get("/journal/calendar")
+def journal_calendar(year: int, month: int) -> dict:
+    if not (1970 <= year <= 2200 and 1 <= month <= 12):
+        raise HTTPException(422, "bad year or month")
+    return _clean(journal.get().calendar(year, month))
+
+
+@app.get("/journal/tags")
+def journal_tags() -> dict:
+    return journal.get().tags()
 
 
 @app.websocket("/ws/{sid}")
