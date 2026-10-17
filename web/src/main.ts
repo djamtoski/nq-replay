@@ -390,7 +390,10 @@ function onMessage(raw: string): void {
     return;
   }
   apply(st, m);
-  if (m.type === "reset" && !replayStart) replayStart = m.now;
+  if (m.type === "reset") {
+    if (!replayStart) replayStart = m.now;
+    syncTfButtons(m.tfs, m.tf);
+  }
   if (drawsChart(m, tf)) {
     // stale-timeframe messages only update account/positions (see drawsChart)
     if (m.type === "tick") {
@@ -484,6 +487,20 @@ async function newSession(
   };
   sock.onmessage = (ev) => onMessage(ev.data as string);
   return null;
+}
+
+/** Grey out timeframes the data can't show (1-minute candles have no 1s/15s), and follow the server's choice. */
+function syncTfButtons(allowed: number[] | undefined, serverTf: number): void {
+  if (serverTf !== tf) {
+    tf = serverTf;
+    store.set("tf", tf);
+  }
+  document.querySelectorAll<HTMLButtonElement>("#tfs button").forEach((b) => {
+    const v = Number(b.dataset.tf);
+    b.disabled = !!allowed && !allowed.includes(v);
+    b.classList.toggle("active", v === tf);
+  });
+  syncSpeed();
 }
 
 // ================================================================ UI wiring

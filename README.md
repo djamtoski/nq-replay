@@ -5,6 +5,7 @@
 | `nq_replay.py` | Engine: instruments, sessions, no-look-ahead MTF bars, broker, replay session |
 | `nq_data.py` | Databento `ohlcv-1s` -> daily Parquet; loader into `ReplaySession` |
 | `dukascopy.py` | Free Nasdaq 100 CFD ticks -> the same daily 1s Parquet files |
+| `yahoo.py` | Real NQ futures 1-minute candles (last ~7 days, accumulating) -> daily Parquet |
 | `server.py` | FastAPI + WebSocket API around `ReplaySession` |
 | `web/` | Vite + TypeScript + lightweight-charts frontend |
 | `BREAKDOWN.md` | Design write-up (public docs + standard engine design; FXReplay internals were not analyzed) |
@@ -31,6 +32,14 @@ backtesting price action; not an exact NQ tape.
 The public feed rate-limits bursts (HTTP 429): the downloader then stops and says so instead of retrying, and
 re-running later resumes. Dukascopy's own docs point bulk users to an AWS S3 requester-pays bucket (your AWS account,
 roughly cents per GB), which this tool does not use yet. Check Dukascopy's terms before using it for anything but personal use.
+
+**Real NQ futures, free, last week only: Yahoo** (1-minute candles, `NQ=F`). Yahoo keeps about 7 days of 1-minute data,
+so run this every few days and the days accumulate on disk:
+```bash
+python nq_data.py yahoo              # or: python nq_data.py yahoo --file saved_response.json
+```
+Only complete, finished trading days are stored. The replay then runs on 1-minute candles: timeframes below 1 minute
+are greyed out and fills inside a candle are approximate (one candle is one step).
 
 **Paid: Databento NQ futures** (below). In the dialog choose Real data, pick the dataset and dates. The replay
 starts on the first day you pick, at the start time, with 3 trading days of earlier data as chart history.
@@ -90,7 +99,7 @@ cd web && npm test && npx tsc --noEmit
 CI runs the checks below on every PR (plus dependency audits, CodeQL and weekly Dependabot updates):
 ```bash
 pip install -r requirements-dev.txt
-ruff check . && ruff format --check . && mypy nq_replay.py nq_data.py server.py journal.py dukascopy.py
+ruff check . && ruff format --check . && mypy nq_replay.py nq_data.py server.py journal.py dukascopy.py yahoo.py
 python -m pytest -q --cov                # fails under 80% coverage (pyproject.toml)
 cd web && npm run lint && npm run format:check && npm run coverage   # coverage thresholds in vitest.config.ts
 ```

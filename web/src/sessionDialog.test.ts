@@ -33,6 +33,16 @@ describe("clampToDataset", () => {
       end: "2024-02-01",
     });
   });
+  it("shows the whole dataset when the dates miss it entirely", () => {
+    expect(clampToDataset("2025-03-03", "2025-03-07", ds)).toEqual({
+      start: ds.first,
+      end: ds.last,
+    });
+    expect(clampToDataset("2026-01-05", "2026-01-09", ds)).toEqual({
+      start: ds.first,
+      end: ds.last,
+    });
+  });
   it("fills in blanks with the whole dataset and fixes an inverted range", () => {
     expect(clampToDataset("", "", ds)).toEqual({ start: ds.first, end: ds.last });
     expect(clampToDataset("2024-05-01", "", ds)).toEqual({ start: "2024-05-01", end: ds.last });
