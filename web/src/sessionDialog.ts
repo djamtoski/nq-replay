@@ -18,6 +18,8 @@ export interface Range {
 
 /** Keep a chosen range inside the data that exists; an empty or inverted choice becomes the whole dataset. */
 export function clampToDataset(start: string, end: string, d: Dataset): Range {
+  // dates from somewhere else (the synthetic defaults, another dataset) that miss this data entirely: show all of it
+  if (start && end && (end < d.first || start > d.last)) return { start: d.first, end: d.last };
   const inside = (x: string) => (x < d.first ? d.first : x > d.last ? d.last : x);
   const s = start ? inside(start) : d.first;
   const e = end ? inside(end) : d.last;
