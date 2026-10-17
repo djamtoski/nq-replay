@@ -262,8 +262,9 @@ def load_bars(
     )
     if back_adjust:
         o, h, l, c = _back_adjust(o, h, l, c, iid)
-    D = 10**9
-    return [Bar(ts[i], o[i], h[i], l[i], c[i], v[i], D) for i in range(len(ts))]
+    # datasets built from coarser candles (Yahoo's 1-minute NQ) carry a `dur` column; the rest are 1-second bars
+    dur = tbl.column("dur").to_pylist() if "dur" in tbl.column_names else [10**9] * len(ts)
+    return [Bar(ts[i], o[i], h[i], l[i], c[i], v[i], dur[i]) for i in range(len(ts))]
 
 
 def _back_adjust(o, h, l, c, iid):
@@ -329,6 +330,18 @@ def info(root: Path = DEFAULT_ROOT) -> None:
         print(f"{f.relative_to(root)}  rows={m.num_rows:,}  {f.stat().st_size / 1e6:.2f} MB")
 
 
+def _yahoo(a) -> None:
+    """Real NQ futures, 1-minute candles, last ~7 days (see yahoo.py)."""
+    import yahoo
+
+    try:
+        raw = Path(a.file).read_bytes() if a.file else yahoo.fetch_json()
+        n = yahoo.ingest(raw, a.root, a.force)
+    except (OSError, ValueError) as e:
+        sys.exit(f"Could not read Yahoo data: {e}")
+    print(f"done: {n} day(s) written under {yahoo.SYMBOL}")
+
+
 def _dukascopy(a) -> None:
     """Free Nasdaq 100 index CFD ticks -> the same daily 1s Parquet files (see dukascopy.py)."""
     import dukascopy
@@ -362,12 +375,15 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("cmd", choices=["cost", "ingest", "info", "dukascopy"])
+    ap.add_argument("cmd", choices=["cost", "ingest", "info", "dukascopy", "yahoo"])
     ap.add_argument("--symbol", default="NQ.v.0")
     ap.add_argument("--start", type=_d)
     ap.add_argument("--end", type=_d)
     ap.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     ap.add_argument("--force", action="store_true")
+    ap.add_argument(
+        "--file", type=Path, help="yahoo: import this saved chart response instead of downloading"
+    )
     ap.add_argument("--yes", action="store_true", help="skip the cost confirmation prompt")
     ap.add_argument(
         "--max-cost",
@@ -378,6 +394,8 @@ def main(argv=None) -> None:
     a = ap.parse_args(argv)
     if a.cmd == "info":
         return info(a.root)
+    if a.cmd == "yahoo":
+        return _yahoo(a)
     if not (a.start and a.end):
         ap.error("--start and --end are required")
     if a.cmd == "dukascopy":

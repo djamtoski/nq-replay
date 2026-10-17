@@ -387,6 +387,7 @@ class Runtime:
         return {
             "type": "reset",
             "tf": c.tf,
+            "tfs": list(ss.tfs),  # the timeframes this session can show
             "now": sh["now"],
             "cursor": sh["cursor"],
             "total": sh["total"],
@@ -647,13 +648,20 @@ def _build(req: CreateSession) -> ReplaySession:
         warm = start_index(bars, req.start, req.start_time)
         if warm >= len(bars):
             raise HTTPException(404, _no_data(req))
-    ss = ReplaySession(bars, inst, tfs=tuple(req.tfs), exec_model=xm, balance=req.balance)
+    # timeframes shorter than the data's own candles (1-minute Yahoo data) would only repeat them
+    tfs = tuple(t for t in req.tfs if t * S >= bars[0].dur_ns)
+    if not tfs:
+        raise HTTPException(422, "These timeframes are shorter than the data's candles")
+    ss = ReplaySession(bars, inst, tfs=tfs, exec_model=xm, balance=req.balance)
     if warm:
         ss.preload(warm)
     return ss
 
 
-DATASET_LABELS = {"USATECH.IDX": "Nasdaq 100 CFD (Dukascopy)"}
+DATASET_LABELS = {
+    "USATECH.IDX": "Nasdaq 100 CFD (Dukascopy)",
+    "NQ.yahoo": "NQ futures (Yahoo, 1-minute)",
+}
 
 
 @app.get("/datasets")
@@ -841,6 +849,10 @@ async def ws(websocket: WebSocket, sid: str, tf: int | None = None) -> None:
         return
     if tf is None:
         tf = 60 if 60 in rt.ss.tfs else rt.ss.tfs[0]
+    if tf in DEFAULT_TFS and tf < rt.ss.tfs[0]:
+        tf = rt.ss.tfs[
+            0
+        ]  # a standard timeframe finer than this data's candles: give the finest available
     if tf not in rt.ss.tfs:
         await websocket.close(code=4400)  # unknown timeframe
         return

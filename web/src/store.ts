@@ -79,6 +79,7 @@ export type ServerMsg =
   | {
       type: "reset";
       tf: number;
+      tfs?: number[]; // timeframes the session can show (1-minute data has no 1s/15s)
       now: number;
       cursor: number;
       total: number;
