@@ -44,8 +44,8 @@ SYMBOL = "USATECH.IDX"  # directory name under data/bars
 PRICE_SCALE = 1000.0
 TICK = 0.25
 RECORD = struct.Struct(">IIIff")
-WORKERS = 6
-RETRIES = 3
+WORKERS = 3  # the feed throttles bursts: more parallel requests meant more timeouts, not more speed
+RETRIES = 6
 USER_AGENT = "nq-replay/1.0 (personal backtesting; contact: local)"
 
 Fetch = Callable[
@@ -65,7 +65,7 @@ def fetch_hour(h: datetime, *, opener=urllib.request.urlopen, sleep=_time.sleep)
     last: Exception | None = None
     for attempt in range(RETRIES):
         try:
-            with opener(req, timeout=60) as r:
+            with opener(req, timeout=45) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -73,7 +73,7 @@ def fetch_hour(h: datetime, *, opener=urllib.request.urlopen, sleep=_time.sleep)
             last = e
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             last = e
-        sleep(1.5 * (attempt + 1))
+        sleep(min(2.0 * 2**attempt, 30.0))  # 2, 4, 8, 16, 30 s: ride out throttling
     raise ConnectionError(f"could not download {h:%Y-%m-%d %H}h after {RETRIES} tries: {last}")
 
 
