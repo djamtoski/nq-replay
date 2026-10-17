@@ -165,7 +165,7 @@
             >Data
             <select id="source">
               <option value="synthetic">Synthetic (demo)</option>
-              <option value="parquet">Real data (Parquet)</option>
+              <option value="parquet">Real data</option>
             </select>
           </label>
           <label
@@ -179,8 +179,12 @@
           <label
             >Balance ($) <input id="balance" type="number" min="1000" step="1000" value="50000"
           /></label>
-          <label class="real">Start date <input id="start" type="date" /></label>
-          <label class="real">End date <input id="end" type="date" /></label>
+          <label class="real span2"
+            >Dataset
+            <select id="dataset"></select
+          ></label>
+          <label>Start date <input id="start" type="date" /></label>
+          <label>End date <input id="end" type="date" /></label>
         </div>
         <p id="dlgHint" class="muted small"></p>
         <p id="dlgErr" class="err"></p>

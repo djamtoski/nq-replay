@@ -23,6 +23,7 @@ export function planReplay(info: ReplayInfo, currentSid: string): ReplayPlan {
 
 export interface SessionSettings {
   source: string;
+  symbol?: string;
   instrument: string;
   startTime: string;
   balance: number;
@@ -34,6 +35,7 @@ export interface SessionSettings {
 export function settingsFromRequest(r: Record<string, unknown>): SessionSettings {
   return {
     source: String(r.source ?? "synthetic"),
+    symbol: r.symbol ? String(r.symbol) : undefined,
     instrument: String(r.instrument ?? "NQ"),
     startTime: String(r.start_time ?? "09:00"),
     balance: Number(r.balance) || 50000,

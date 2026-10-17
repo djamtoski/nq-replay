@@ -4,6 +4,7 @@
 |---|---|
 | `nq_replay.py` | Engine: instruments, sessions, no-look-ahead MTF bars, broker, replay session |
 | `nq_data.py` | Databento `ohlcv-1s` -> daily Parquet; loader into `ReplaySession` |
+| `dukascopy.py` | Free Nasdaq 100 CFD ticks -> the same daily 1s Parquet files |
 | `server.py` | FastAPI + WebSocket API around `ReplaySession` |
 | `web/` | Vite + TypeScript + lightweight-charts frontend |
 | `BREAKDOWN.md` | Design write-up (public docs + standard engine design; FXReplay internals were not analyzed) |
@@ -15,13 +16,33 @@ cd web && npm install && npm run dev      # http://127.0.0.1:5173
 ```
 Frontend and API only accept `localhost`/`127.0.0.1` origins (see `ALLOWED_ORIGINS` in `server.py`).
 
-## Real data (optional, costs money)
+## Real data
+Two sources write the same daily files (`data/bars/<dataset>/1s/...`), and the New session dialog lists whatever is
+on disk with its date range:
+
+**Free: Nasdaq 100 index CFD from Dukascopy** (no account, no key). Tick quotes become 1-second candles
+(mid price, 0.25 tick; volume = number of quotes, since there is no traded volume):
+```bash
+python nq_data.py dukascopy --start 2024-01-02 --end 2024-12-31    # about 1 GB of downloads per year, resumable
+```
+It is the cash-index CFD, not the NQ futures contract: candle shapes and intraday patterns match, absolute prices
+differ by a few points of basis, there are no contract rolls, and it trades almost 24h. Fine for practising and
+backtesting price action; not an exact NQ tape.
+The public feed rate-limits bursts (HTTP 429): the downloader then stops and says so instead of retrying, and
+re-running later resumes. Dukascopy's own docs point bulk users to an AWS S3 requester-pays bucket (your AWS account,
+roughly cents per GB), which this tool does not use yet. Check Dukascopy's terms before using it for anything but personal use.
+
+**Paid: Databento NQ futures** (below). In the dialog choose Real data, pick the dataset and dates. The replay
+starts on the first day you pick, at the start time, with 3 trading days of earlier data as chart history.
+Synthetic data takes a date range too (up to 10 trading days).
+
+## Databento (optional, costs money)
 ```bash
 set DATABENTO_API_KEY=...                 # never commit this
 python nq_data.py cost   --start 2025-03-03 --end 2025-03-07
 python nq_data.py ingest --start 2025-03-03 --end 2025-03-07
 ```
-Then choose "Real data" in the New session dialog. If the dates you pick aren't downloaded yet it says
+Then choose "Real data" and the Databento dataset in the New session dialog. If the dates you pick aren't downloaded yet it says
 "No data for <start> to <end>" (the folder and symbol are in the server log, not the dialog), and the replay you
 had open stays as it was.
 
@@ -69,7 +90,7 @@ cd web && npm test && npx tsc --noEmit
 CI runs the checks below on every PR (plus dependency audits, CodeQL and weekly Dependabot updates):
 ```bash
 pip install -r requirements-dev.txt
-ruff check . && ruff format --check . && mypy nq_replay.py nq_data.py server.py journal.py
+ruff check . && ruff format --check . && mypy nq_replay.py nq_data.py server.py journal.py dukascopy.py
 python -m pytest -q --cov                # fails under 80% coverage (pyproject.toml)
 cd web && npm run lint && npm run format:check && npm run coverage   # coverage thresholds in vitest.config.ts
 ```
