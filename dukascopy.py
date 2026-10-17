@@ -48,6 +48,11 @@ WORKERS = 3  # the feed throttles bursts: more parallel requests meant more time
 RETRIES = 6
 USER_AGENT = "nq-replay/1.0 (personal backtesting; contact: local)"
 
+
+class RateLimited(ConnectionError):
+    """HTTP 429. Retrying makes the block last longer, so the run stops and says so."""
+
+
 Fetch = Callable[
     [datetime], bytes | None
 ]  # hour start (UTC) -> raw .bi5 bytes, or None if the feed has none
@@ -70,6 +75,11 @@ def fetch_hour(h: datetime, *, opener=urllib.request.urlopen, sleep=_time.sleep)
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return None
+            if e.code == 429:
+                raise RateLimited(
+                    "Dukascopy is limiting requests from this connection (HTTP 429). "
+                    "Wait a while before trying again; its docs point bulk users to an AWS S3 requester-pays bucket."
+                ) from e
             last = e
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             last = e

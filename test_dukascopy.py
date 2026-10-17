@@ -244,3 +244,18 @@ def test_fetch_hour_retries_transient_errors_then_gives_up_loudly():
 
     with pytest.raises(ConnectionError, match="could not download 2025-03-10 14h"):
         dk.fetch_hour(hour(2025, 3, 10, 14), opener=down, sleep=lambda _s: None)
+
+
+def test_a_429_stops_at_once_instead_of_retrying_into_a_longer_block():
+    calls = []
+
+    def limited(req, timeout):
+        calls.append(1)
+        raise http_error(429)
+
+    with pytest.raises(dk.RateLimited, match="HTTP 429"):
+        dk.fetch_hour(
+            hour(2025, 3, 10, 14), opener=limited, sleep=lambda _s: pytest.fail("must not wait")
+        )
+    assert len(calls) == 1
+    assert issubclass(dk.RateLimited, ConnectionError)  # the CLI already reports these cleanly

@@ -27,7 +27,10 @@ python nq_data.py dukascopy --start 2024-01-02 --end 2024-12-31    # about 1 GB 
 ```
 It is the cash-index CFD, not the NQ futures contract: candle shapes and intraday patterns match, absolute prices
 differ by a few points of basis, there are no contract rolls, and it trades almost 24h. Fine for practising and
-backtesting price action; not an exact NQ tape. Check Dukascopy's terms before using it for anything but personal use.
+backtesting price action; not an exact NQ tape.
+The public feed rate-limits bursts (HTTP 429): the downloader then stops and says so instead of retrying, and
+re-running later resumes. Dukascopy's own docs point bulk users to an AWS S3 requester-pays bucket (your AWS account,
+roughly cents per GB), which this tool does not use yet. Check Dukascopy's terms before using it for anything but personal use.
 
 **Paid: Databento NQ futures** (below). In the dialog choose Real data, pick the dataset and dates. The replay
 starts on the first day you pick, at the start time, with 3 trading days of earlier data as chart history.
